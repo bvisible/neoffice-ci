@@ -147,8 +147,18 @@ jobs:
         run: bench compile-po-to-mo --app ${{ inputs.app }} || true
 
       - name: Commit the new translations back ([skip ci] — no loop)
-        working-directory: ${{ github.workspace }}
         run: |
+          # bench get-app CLONES the app into ~/frappe-bench/apps (a copy), so the
+          # extraction + translation wrote the .po there, not in the checkout. Copy
+          # the .po back into the workspace — which carries the GitHub remote and the
+          # push token — then commit from there.
+          BENCH_APP="/home/runner/frappe-bench/apps/${{ inputs.app }}"
+          cd "$BENCH_APP"
+          find . -path '*/locale/*.po' -print0 | while IFS= read -r -d '' po; do
+            mkdir -p "$GITHUB_WORKSPACE/$(dirname "$po")"
+            cp "$po" "$GITHUB_WORKSPACE/$po"
+          done
+          cd "$GITHUB_WORKSPACE"
           git config user.name "neoffice-i18n-bot"
           git config user.email "dev@neoffice.io"
           # Only the .po carries the translations; the compiled .mo is gitignored.
