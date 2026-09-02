@@ -1,0 +1,297 @@
+# Reusable CI for a Frappe app of the fleet: bench init against OUR frappe fork
+# (version-15 — what the fleet actually runs), install the declared dependencies,
+# then the caller's app at the pushed SHA, BUILD it (an app whose assets do not
+# build must never reach version-15: "code neuf, paquet ancien" already bit us),
+# and run its test suite. Success or failure, the last step reports to the hub,
+# which owns the tracker token: a red run opens/updates the repo's [CI] issue,
+# the next green run closes it with the run URL as the proof.
+#
+# Callers (app repos) use:
+#   uses: bvisible/neoffice-devops/.github/workflows/frappe-app-ci.yml@main
+#   with: { app: <package_name>, install_apps: "erpnext" }
+#   secrets: { CI_REPORT_SECRET: ${{ secrets.CI_REPORT_SECRET }} }
+name: Frappe App CI
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: "Python package name of the app under test (e.g. neoffice_theme)"
+        required: true
+        type: string
+      install_apps:
+        description: "Comma-separated dependency apps to install first, cloned from the bvisible forks (e.g. erpnext)"
+        required: false
+        type: string
+        default: ""
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+      test_args:
+        description: "Extra args appended to bench run-tests (debug switch, e.g. --verbose)"
+        required: false
+        type: string
+        default: ""
+      pytest_paths:
+        description: "App-relative test paths to ALSO run under pytest (informative, non-blocking) — for suites the frappe runner cannot discover (module-level test functions)"
+        required: false
+        type: string
+        default: ""
+      upstream_preview:
+        description: "Bench-init on UPSTREAM frappe/frappe + frappe/erpnext (version-15) instead of our forks — measures what the pending fork upgrade will cost (tracker #138). Reports to a separate [CI amont] issue."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CI_REPORT_SECRET:
+        required: true
+      FLEET_READ_TOKEN:
+        description: "Read token for the PRIVATE bvisible dependency repos (neoffice_theme, erpnextswiss, nora…): a runner has no rights on another private repo. Callers pass `secrets: inherit`."
+        required: false
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    name: build + tests (${{ inputs.app }})
+
+    services:
+      redis-cache:
+        image: redis:alpine
+        ports:
+          - 13000:6379
+      redis-queue:
+        image: redis:alpine
+        ports:
+          - 11000:6379
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: --health-cmd="mariadb-admin ping" --health-interval=5s --health-timeout=2s --health-retries=3
+
+    steps:
+      - name: Clone app under test
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          check-latest: true
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ inputs.app }}-${{ hashFiles('**/*requirements.txt', '**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ inputs.app }}-
+            ${{ runner.os }}-pip-
+
+      - name: Install MariaDB client
+        run: sudo apt-get update -q && sudo apt-get install -yq mariadb-client
+
+      - name: Init bench (bvisible/frappe version-15 — the fleet's frappe)
+        run: |
+          pip install frappe-bench
+          FRAPPE_PATH=https://github.com/bvisible/frappe
+          if [ "${{ inputs.upstream_preview }}" = "true" ]; then
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            echo "UPSTREAM PREVIEW: frappe from $FRAPPE_PATH (erpnext from frappe/erpnext below)"
+          fi
+          bench init --skip-redis-config-generation --skip-assets \
+            --frappe-path "$FRAPPE_PATH" \
+            --frappe-branch version-15 \
+            --python "$(which python)" ~/frappe-bench
+          # frappe's Dropbox integration still imports pkg_resources at install
+          # time. Python 3.12 venvs ship without setuptools, and installing it
+          # unpinned pulls 81.0.0 — the release that REMOVED pkg_resources — so
+          # the second run died exactly like the first. Pin below 81, like the
+          # fleet's own envs.
+          ~/frappe-bench/env/bin/pip install --quiet "setuptools<81"
+          ~/frappe-bench/env/bin/python -c "import pkg_resources; print('pkg_resources OK')"
+          mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
+          mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
+
+      - name: Get dependency apps
+        if: inputs.install_apps != ''
+        working-directory: /home/runner/frappe-bench
+        run: |
+          # Private bvisible deps (neoffice_theme, erpnextswiss, nora…) need a
+          # token: the runner only holds rights on the repo under test.
+          AUTH="https://github.com/"
+          if [ -n "$FLEET_READ_TOKEN" ]; then
+            AUTH="https://x-access-token:${FLEET_READ_TOKEN}@github.com/"
+          fi
+          IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
+          for dep in "${DEPS[@]}"; do
+            dep="$(echo "$dep" | xargs)"
+            [ -z "$dep" ] && continue
+            if [ "${{ inputs.upstream_preview }}" = "true" ] && [ "$dep" = "erpnext" ]; then
+              bench get-app erpnext https://github.com/frappe/erpnext --branch version-15
+              continue
+            fi
+            bench get-app "$dep" "${AUTH}bvisible/${dep//_/-}" --branch version-15 \
+              || bench get-app "$dep" "${AUTH}bvisible/${dep}" --branch version-15
+          done
+        env:
+          FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
+
+      - name: Get app under test
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
+          bench setup requirements --dev
+
+      - name: New site + install
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench new-site --db-root-password root --admin-password admin test_site
+          # hrms creates the "Employee Self Service" User Type, whose install
+          # validates a per-type doctype limit in site config and dies without
+          # it ("The limit has not set for the user type…").
+          if [[ ",${{ inputs.install_apps }}," == *",hrms,"* ]]; then
+            bench --site test_site set-config user_type_doctype_limit '{"employee_self_service": 80}' --parse
+          fi
+          IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
+          for dep in "${DEPS[@]}"; do
+            dep="$(echo "$dep" | xargs)"
+            [ -z "$dep" ] && continue
+            bench --site test_site install-app "$dep"
+          done
+          bench --site test_site install-app ${{ inputs.app }}
+
+      - name: Bootstrap erpnext test data
+        if: contains(inputs.install_apps, 'erpnext')
+        working-directory: /home/runner/frappe-bench
+        run: |
+          # frappe's test runner only runs the before_tests hooks of the app
+          # UNDER TEST, so erpnext's bootstrap (setup wizard: company, warehouse
+          # types, fiscal years) never runs when testing a third-party app —
+          # neoffice_theme died on "Could not find Warehouse Type: Transit".
+          # hrms solves it with its own before_tests hook; we run erpnext's
+          # bootstrap explicitly instead, so no app needs a hook for CI.
+          bench --site test_site set-config allow_tests true
+          bench --site test_site execute erpnext.setup.utils.before_tests
+
+      - name: Build (blocking — an app that does not build must not ship)
+        working-directory: /home/runner/frappe-bench
+        run: bench build --app ${{ inputs.app }}
+
+      - name: Debug test records (test_args starts with --debug-records)
+        if: startsWith(inputs.test_args, '--debug-records')
+        working-directory: /home/runner/frappe-bench/sites
+        env:
+          # --debug-records walks every doctype of the app; --debug-records:X
+          # walks only X, with a spy that prints each record before insert.
+          DEBUG_SPEC: ${{ inputs.test_args }}
+          APP_UNDER_TEST: ${{ inputs.app }}
+        run: |
+          ../env/bin/python <<'PY'
+          import os
+          import traceback
+
+          import frappe
+          import frappe.test_runner as tr
+
+          frappe.init(site="test_site", sites_path=".")
+          frappe.connect()
+          frappe.flags.in_test = True
+
+          spec = os.environ["DEBUG_SPEC"]
+          target = spec.split(":", 1)[1] if ":" in spec else None
+
+          orig = tr.make_test_objects
+
+          def spy(doctype, test_records=None, verbose=None, reset=False, commit=False):
+              recs = test_records if test_records is not None else frappe.get_test_records(doctype)
+              print(">>>> make_test_objects %s (%d records)" % (doctype, len(recs or [])), flush=True)
+              for r in recs or []:
+                  keys = ("doctype", "item_code", "name", "variant_of", "has_variants", "item_name")
+                  print("     rec:", {k: r.get(k) for k in keys if r.get(k) is not None}, flush=True)
+              return orig(doctype, test_records=test_records, verbose=verbose, reset=reset, commit=commit)
+
+          tr.make_test_objects = spy
+
+          if target:
+              doctypes = [target]
+          else:
+              mods = frappe.get_all("Module Def", {"app_name": os.environ["APP_UNDER_TEST"]}, pluck="name")
+              doctypes = frappe.get_all(
+                  "DocType", filters={"module": ["in", mods]}, pluck="name", order_by="name"
+              )
+          print("==== %d doctypes to walk" % len(doctypes), flush=True)
+          for dt in doctypes:
+              print("==== DT:", dt, flush=True)
+              try:
+                  tr.make_test_records(dt, verbose=1, commit=True)
+                  tr.make_test_records_for_doctype(dt, verbose=1, commit=True)
+              except Exception as exc:
+                  print("!!!! FAILED at doctype:", dt, "->", type(exc).__name__, str(exc)[:300], flush=True)
+                  traceback.print_exc()
+                  break
+          frappe.db.commit()
+          PY
+
+      - name: Run tests
+        if: "!startsWith(inputs.test_args, '--debug-records')"
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench --site test_site set-config allow_tests true
+          set -o pipefail
+          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee /tmp/test-output.log
+        env:
+          TYPE: server
+          CI: "Yes"
+
+      - name: Pytest (informative — measures suites invisible to the frappe runner)
+        if: inputs.pytest_paths != '' && !startsWith(inputs.test_args, '--debug-records')
+        continue-on-error: true
+        working-directory: /home/runner/frappe-bench/sites
+        run: |
+          # The frappe runner only discovers unittest classes; module-level
+          # test functions (pytest style) never run under it. This pass makes
+          # them visible WITHOUT gating the job — once their real state is
+          # known and hardened, flip it to blocking.
+          ../env/bin/pip install --quiet pytest
+          for p in ${{ inputs.pytest_paths }}; do
+            echo "==== pytest $p"
+            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=line 2>&1 | tail -30
+          done
+
+      - name: Report to the fleet tracker (via the hub)
+        # success() || failure() and not always(): a cancelled run (superseded
+        # by concurrency) must not report — it says nothing about the code.
+        # Debug walks never report either: their green says nothing about the
+        # tests (a --debug-records job exits 0 even when the walk fails) — one
+        # actually closed the erpnextswiss [CI] issue as "proof".
+        if: (success() || failure()) && !startsWith(inputs.test_args, '--debug-records')
+        run: |
+          SUMMARY=""
+          if [ "${{ job.status }}" != "success" ]; then
+            if [ -f /tmp/test-output.log ]; then
+              SUMMARY=$(tail -c 1400 /tmp/test-output.log)
+            else
+              SUMMARY="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
+            fi
+          fi
+          curl -sS --max-time 20 -X POST \
+            "https://neoservice.neoffice.me/api/method/neoffice_devops.github.ci.report" \
+            --data-urlencode "secret=${{ secrets.CI_REPORT_SECRET }}" \
+            --data-urlencode "repo=${{ github.repository }}" \
+            --data-urlencode "app=${{ inputs.app }}" \
+            --data-urlencode "sha=${{ github.sha }}" \
+            --data-urlencode "run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --data-urlencode "conclusion=${{ job.status }}" \
+            --data-urlencode "ref=${{ github.ref_name }}" \
+            --data-urlencode "upstream=${{ inputs.upstream_preview }}" \
+            --data-urlencode "summary=${SUMMARY}" || true
