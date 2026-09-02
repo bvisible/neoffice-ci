@@ -1,0 +1,163 @@
+# Reusable PO auto-translation for a fleet app. A caller runs it nightly (and
+# on demand); it extracts the app's source strings, fills every UNTRANSLATED
+# msgstr with Sonnet, compiles, and commits the .po back with [skip ci] (never a
+# loop; deploy-on-merge only fires on PR merge, so nothing is queued to clients
+# here — the translated strings ride the normal deploy loop with its canary gate).
+#
+# Only empty msgstr are ever filled: human translations are never touched and a
+# re-run is a no-op. Placeholders / HTML / format specifiers are preserved and
+# verified by the translator (scripts/translate_po.py in this repo); a returned
+# string that lost one is dropped, never written. PO only, never CSV (fleet rule).
+#
+# Caller (in the app repo, .github/workflows/translate.yml):
+#   name: Translate
+#   on:
+#     schedule: [{ cron: "30 2 * * *" }]
+#     workflow_dispatch:
+#   jobs:
+#     i18n:
+#       uses: bvisible/neoffice-ci/.github/workflows/translate-po.yml@main
+#       with: { app: swisspost_barcode }
+#       secrets: inherit
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: "Python package name of the app (e.g. neoffice_theme)"
+        required: true
+        type: string
+      install_apps:
+        description: "Comma-separated dependency apps to bench get-app first (only if the app's Python imports them at module load, needed for pot extraction)"
+        required: false
+        type: string
+        default: ""
+      locales:
+        description: "Comma-separated locales to translate (default: fr)"
+        required: false
+        type: string
+        default: "fr"
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+    secrets:
+      FLEET_READ_TOKEN:
+        description: "Read token for PRIVATE bvisible dependency repos. Callers pass `secrets: inherit`."
+        required: false
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: "Subscription OAuth token for the claude CLI (Sonnet). Callers pass `secrets: inherit`."
+        required: true
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    name: translate (${{ inputs.app }})
+    permissions:
+      contents: write          # push the translated .po back to the caller repo
+    steps:
+      - name: Clone app
+        uses: actions/checkout@v4
+        with:
+          ref: version-15
+          # persist-credentials (default true) leaves the GITHUB_TOKEN in git
+          # config so the final push authenticates.
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          check-latest: true
+
+      - name: Install the Claude CLI (Sonnet, billed to the subscription)
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Init bench (bvisible/frappe version-15 — no site, no DB needed)
+        run: |
+          pip install frappe-bench
+          bench init --skip-redis-config-generation --skip-assets \
+            --frappe-path https://github.com/bvisible/frappe \
+            --frappe-branch version-15 \
+            --python "$(which python)" ~/frappe-bench
+          # setuptools<81 keeps pkg_resources (frappe's Dropbox integration
+          # imports it at install time); 81 removed it. Same pin as the fleet.
+          ~/frappe-bench/env/bin/pip install --quiet "setuptools<81"
+          ~/frappe-bench/env/bin/pip install --quiet polib
+
+      - name: Get dependency apps
+        if: inputs.install_apps != ''
+        working-directory: /home/runner/frappe-bench
+        run: |
+          AUTH="https://github.com/"
+          if [ -n "$FLEET_READ_TOKEN" ]; then
+            AUTH="https://x-access-token:${FLEET_READ_TOKEN}@github.com/"
+          fi
+          IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
+          for dep in "${DEPS[@]}"; do
+            dep="$(echo "$dep" | xargs)"; [ -z "$dep" ] && continue
+            bench get-app "$dep" "${AUTH}bvisible/${dep//_/-}" --branch version-15 \
+              || bench get-app "$dep" "${AUTH}bvisible/${dep}" --branch version-15
+          done
+        env:
+          FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
+
+      - name: Get the app + its requirements (source must import for pot extraction)
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
+          bench setup requirements --dev
+
+      - name: Extract source strings and merge into the PO files
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench generate-pot-file --app ${{ inputs.app }}
+          for loc in ${LOCALES//,/ }; do
+            bench update-po-files --app ${{ inputs.app }} --locale "$loc" || \
+              bench update-po-files --app ${{ inputs.app }}
+          done
+        env:
+          LOCALES: ${{ inputs.locales }}
+
+      - name: Translate the empty msgstr with Sonnet
+        working-directory: /home/runner/frappe-bench
+        run: |
+          curl -fsSL -o /tmp/translate_po.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/translate_po.py
+          APP_DIR="apps/${{ inputs.app }}"
+          for loc in ${LOCALES//,/ }; do
+            # a locale dir may sit at <app>/<app>/locale or <app>/locale
+            for po in $(find "$APP_DIR" -path "*/locale/${loc}.po"); do
+              echo "==== translating $po ($loc)"
+              ~/frappe-bench/env/bin/python /tmp/translate_po.py "$po" --locale "$loc"
+            done
+          done
+        env:
+          LOCALES: ${{ inputs.locales }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # translation is volume, not reasoning: never a bigger model (fleet rule)
+          TRANSLATE_MODEL: claude-sonnet-5
+
+      - name: Compile PO -> MO
+        working-directory: /home/runner/frappe-bench
+        run: bench compile-po-to-mo --app ${{ inputs.app }} || true
+
+      - name: Commit the new translations back ([skip ci] — no loop)
+        working-directory: ${{ github.workspace }}
+        run: |
+          git config user.name "neoffice-i18n-bot"
+          git config user.email "dev@neoffice.io"
+          # Only the .po carries the translations; the compiled .mo is gitignored.
+          git add '**/locale/*.po' 2>/dev/null || git add .
+          if git diff --cached --quiet; then
+            echo "no new translations — nothing to commit"
+            exit 0
+          fi
+          N=$(git diff --cached --numstat | wc -l)
+          git commit -m "chore(i18n): auto-translate new strings with Sonnet [skip ci]" \
+                     -m "Filled empty msgstr in ${N} locale file(s). Human translations untouched; placeholders verified. Generated by translate-po.yml."
+          git push origin HEAD:version-15
