@@ -151,6 +151,10 @@ jobs:
         run: |
           bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
           bench setup requirements --dev
+          # Several fleet suites import pytest at module level (pytest-style
+          # files next to unittest ones): without it in the env, frappe's
+          # runner dies at collection with ModuleNotFoundError.
+          ~/frappe-bench/env/bin/pip install --quiet pytest
 
       - name: New site + install
         working-directory: /home/runner/frappe-bench
