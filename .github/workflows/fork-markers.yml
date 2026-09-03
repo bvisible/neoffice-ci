@@ -73,6 +73,7 @@ jobs:
           set +e
           python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "${{ steps.range.outputs.head }}" --json /tmp/fm/report.json | tee /tmp/fm/check.txt
           N=$(python3 -c "import json;print(len(json.load(open('/tmp/fm/report.json'))['unmarked']))")
+          echo "check exit: ${PIPESTATUS[0]} — $N unmarked"
           echo "unmarked=$N" >> "$GITHUB_OUTPUT"
           HAS=false; [ -n "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" ] && HAS=true
           echo "has_token=$HAS" >> "$GITHUB_OUTPUT"
@@ -127,11 +128,20 @@ jobs:
           open("/tmp/fm/prompt.txt", "w", encoding="utf-8").write(prompt)
           print(f"prompt: {len(prompt)} chars, {len(rep['unmarked'])} hunks")
           PY
+          set +e
           claude -p "$(cat /tmp/fm/prompt.txt)" --model "${{ inputs.model }}" \
             --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep" --permission-mode acceptEdits \
-            --max-turns 150 --output-format text > /tmp/fm/claude.log 2>&1 || echo "::warning::claude exited non-zero"
+            --max-turns 150 --output-format text > /tmp/fm/claude.log 2>&1
+          RC=$?
+          set -e
           echo "--- claude (tail) ---"; tail -c 3000 /tmp/fm/claude.log; echo
           git status --short | head -40
+          if [ $RC -ne 0 ] || grep -qiE "session limit|rate limit|usage limit|not logged in|invalid api key|authentication" /tmp/fm/claude.log; then
+            REASON=$(grep -iE "session limit|rate limit|usage limit|not logged in|invalid api key|authentication" /tmp/fm/claude.log | head -1)
+            echo "::error::Claude could not run the marker pass (exit $RC): ${REASON:-see the log above}. ${{ steps.check.outputs.unmarked }} hunks stay unmarked — re-run this workflow (workflow_dispatch with the same range) once the limit resets."
+            git checkout -- . && git clean -fd
+            exit 1
+          fi
 
       - name: Accept the pass only if it is comment-only and still compiles
         if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
@@ -171,6 +181,6 @@ jobs:
         run: |
           set +e
           python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "$(git rev-parse HEAD)" | tee /tmp/fm/recheck.txt
-          RC=$?
+          RC=${PIPESTATUS[0]}
           { echo; echo "### After the marker pass"; echo; echo '```'; cat /tmp/fm/recheck.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ $RC -eq 0 ] || { echo "::error::hunks still unmarked after the pass — a human must mark them"; exit 1; }
