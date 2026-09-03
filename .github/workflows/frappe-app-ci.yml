@@ -48,6 +48,11 @@ on:
         required: false
         type: boolean
         default: false
+      erpnext_bootstrap:
+        description: "Run erpnext's own before_tests (setup wizard, test company) after the install. Default true; set false for an app whose own before_tests hook already completes the setup — hrms — or the two bootstraps fight over the default company."
+        required: false
+        type: boolean
+        default: true
       node_version:
         description: "Node.js for the runner. Default 22 = what the fleet runs (osiris, 2026-09-03); frappe v15 supports it, and lms/suite root package.json demand >=22 (bench yarn-installs a root package.json even with --skip-assets). 18 was a CI-only relic."
         required: false
@@ -198,7 +203,7 @@ jobs:
           bench --site test_site install-app ${{ inputs.app }}
 
       - name: Bootstrap erpnext test data
-        if: contains(inputs.install_apps, 'erpnext')
+        if: contains(inputs.install_apps, 'erpnext') && inputs.erpnext_bootstrap
         working-directory: /home/runner/frappe-bench
         run: |
           # frappe's test runner only runs the before_tests hooks of the app
