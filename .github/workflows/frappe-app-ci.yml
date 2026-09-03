@@ -49,10 +49,10 @@ on:
         type: boolean
         default: false
       node_version:
-        description: "Node.js for the runner. Default 20: frappe v15 supports 18/20 and the fleet runs 22 (osiris, 2026-09-03) — 18 was a CI-only relic that broke on pos_next's root package.json (playwright needs >=20, and bench yarn-installs a root package.json even with --skip-assets)."
+        description: "Node.js for the runner. Default 22 = what the fleet runs (osiris, 2026-09-03); frappe v15 supports it, and lms/suite root package.json demand >=22 (bench yarn-installs a root package.json even with --skip-assets). 18 was a CI-only relic."
         required: false
         type: string
-        default: "20"
+        default: "22"
     secrets:
       CI_REPORT_SECRET:
         required: true
@@ -186,7 +186,7 @@ jobs:
           # hrms creates the "Employee Self Service" User Type, whose install
           # validates a per-type doctype limit in site config and dies without
           # it ("The limit has not set for the user type…").
-          if [[ ",${{ inputs.install_apps }}," == *",hrms,"* ]]; then
+          if [[ ",${{ inputs.install_apps }}," == *,hrms,* || "${{ inputs.app }}" == "hrms" ]]; then
             bench --site test_site set-config user_type_doctype_limit '{"employee_self_service": 80}' --parse
           fi
           IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
