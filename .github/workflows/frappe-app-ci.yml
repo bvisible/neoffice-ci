@@ -49,10 +49,10 @@ on:
         type: boolean
         default: false
       node_version:
-        description: "Node.js for the runner. 18 = what the fleet runs; raise it (20) only for a fork whose root package.json demands it — and open an issue, because its provisioning on a node-18 instance would fail the same way."
+        description: "Node.js for the runner. Default 20: frappe v15 supports 18/20 and the fleet runs 22 (osiris, 2026-09-03) — 18 was a CI-only relic that broke on pos_next's root package.json (playwright needs >=20, and bench yarn-installs a root package.json even with --skip-assets)."
         required: false
         type: string
-        default: "18"
+        default: "20"
     secrets:
       CI_REPORT_SECRET:
         required: true
