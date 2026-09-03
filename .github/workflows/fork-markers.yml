@@ -1,0 +1,176 @@
+name: Fork markers (reusable)
+# The mechanical half of the rule "mark every change to code that is not ours":
+# every push to a fork is diffed, hunks that change non-comment lines without a
+# `//// Neoffice` marker nearby are listed, and Claude (Sonnet) is asked to write
+# the missing marker comments from the commit messages. Its work is accepted only
+# if it is comment-only (scripts/fork_markers.py verify) and still compiles; it is
+# pushed back by neoffice-fork-bot with [skip ci]. Anything left unmarked fails
+# the run so a human sees it.
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: "Older commit of the range (default: the push's `before`, else HEAD~1)"
+        required: false
+        type: string
+        default: ""
+      head:
+        description: "Newer commit of the range (default: the pushed sha)"
+        required: false
+        type: string
+        default: ""
+      model:
+        description: "Claude model for the marker pass — Sonnet: volume work, no reasoning needed"
+        required: false
+        type: string
+        default: "claude-sonnet-5"
+      max_hunks:
+        description: "Above this many unmarked hunks the pass is refused (a marking agent or a human does it)"
+        required: false
+        type: number
+        default: 80
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+
+jobs:
+  markers:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch the tooling (bvisible/neoffice-ci, public)
+        run: |
+          mkdir -p /tmp/fm
+          curl -fsSL https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/fork_markers.py -o /tmp/fm/fork_markers.py
+          curl -fsSL https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/fork_markers_prompt.md -o /tmp/fm/prompt.md
+
+      - name: Resolve the range
+        id: range
+        run: |
+          BASE="${{ inputs.base }}"; HEAD="${{ inputs.head }}"
+          [ -n "$HEAD" ] || HEAD="${{ github.sha }}"
+          [ -n "$BASE" ] || BASE="${{ github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$BASE" "$HEAD" 2>/dev/null; then
+            BASE=$(git rev-parse "$HEAD~1" 2>/dev/null || echo "$HEAD")   # first commit of a repo: nothing to compare
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"; echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "range: $BASE..$HEAD"
+
+      - name: Check the markers
+        id: check
+        run: |
+          set +e
+          python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "${{ steps.range.outputs.head }}" --json /tmp/fm/report.json | tee /tmp/fm/check.txt
+          N=$(python3 -c "import json;print(len(json.load(open('/tmp/fm/report.json'))['unmarked']))")
+          echo "unmarked=$N" >> "$GITHUB_OUTPUT"
+          HAS=false; [ -n "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" ] && HAS=true
+          echo "has_token=$HAS" >> "$GITHUB_OUTPUT"
+          { echo "### Fork markers — \`${{ steps.range.outputs.base }}\`..\`${{ steps.range.outputs.head }}\`"; echo; echo '```'; cat /tmp/fm/check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Every changed hunk carries a marker
+        if: steps.check.outputs.unmarked == '0'
+        run: echo "nothing to do"
+
+      - name: Too many unmarked hunks for an automatic pass
+        if: steps.check.outputs.unmarked != '0' && fromJSON(steps.check.outputs.unmarked) > fromJSON(inputs.max_hunks)
+        run: |
+          echo "::error::${{ steps.check.outputs.unmarked }} unmarked hunks — above max_hunks (${{ inputs.max_hunks }}): run a marking agent or mark by hand"
+          exit 1
+
+      - name: No Claude token on this repository
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token != 'true'
+        run: |
+          echo "::error::${{ steps.check.outputs.unmarked }} unmarked hunks and no CLAUDE_CODE_OAUTH_TOKEN secret to write the markers — mark them by hand"
+          exit 1
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Ask Sonnet to write the missing markers
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          FM_BASE: ${{ steps.range.outputs.base }}
+          FM_HEAD: ${{ steps.range.outputs.head }}
+          FM_REPO: ${{ github.repository }}
+          FM_BRANCH: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          rep = json.load(open("/tmp/fm/report.json"))
+          commits = subprocess.run(["git", "log", "--format=- %h %s%n%b", f"{os.environ['FM_BASE']}..{os.environ['FM_HEAD']}"], capture_output=True, text=True).stdout.strip() or "(no commit message available)"
+          lines = []
+          for u in rep["unmarked"]:
+              loc = f"{u['file']}:{u['new_start']}" if u.get("new_start") else u["file"]
+              lines.append(f"- {loc} — {u['kind']} ({u.get('new_count', 0)} new lines)")
+              for s in u.get("snippet") or []:
+                  lines.append("      | " + s.rstrip()[:160])
+          tpl = open("/tmp/fm/prompt.md", encoding="utf-8").read()
+          prompt = tpl.replace("{repo}", os.environ["FM_REPO"]).replace("{branch}", os.environ["FM_BRANCH"]).replace("{head}", os.environ["FM_HEAD"][:10]).replace("{range}", f"{os.environ['FM_BASE'][:10]}..{os.environ['FM_HEAD'][:10]}").replace("{commits}", commits).replace("{hunks}", "\n".join(lines))
+          open("/tmp/fm/prompt.txt", "w", encoding="utf-8").write(prompt)
+          print(f"prompt: {len(prompt)} chars, {len(rep['unmarked'])} hunks")
+          PY
+          claude -p "$(cat /tmp/fm/prompt.txt)" --model "${{ inputs.model }}" \
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep" --permission-mode acceptEdits \
+            --max-turns 150 --output-format text > /tmp/fm/claude.log 2>&1 || echo "::warning::claude exited non-zero"
+          echo "--- claude (tail) ---"; tail -c 3000 /tmp/fm/claude.log; echo
+          git status --short | head -40
+
+      - name: Accept the pass only if it is comment-only and still compiles
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
+        run: |
+          if ! python3 /tmp/fm/fork_markers.py verify --base "${{ steps.range.outputs.head }}"; then
+            echo "::error::the marker pass changed more than comments — discarded, nothing pushed"
+            git checkout -- . && git clean -fd
+            exit 1
+          fi
+          for f in $(git diff --name-only); do
+            case "$f" in
+              *.py) python3 -m py_compile "$f" || { echo "::error::$f no longer compiles — discarded"; git checkout -- . && git clean -fd; exit 1; } ;;
+              *.js|*.mjs|*.cjs) node --check "$f" || { echo "::error::$f no longer parses — discarded"; git checkout -- . && git clean -fd; exit 1; } ;;
+            esac
+          done
+
+      - name: Commit and push the markers (neoffice-fork-bot, [skip ci])
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
+        id: push
+        run: |
+          git add -u
+          [ -f NEOFFICE_FORK_MARKERS.md ] && git add NEOFFICE_FORK_MARKERS.md
+          if git diff --cached --quiet; then echo "the pass changed nothing"; exit 0; fi
+          BASE="${{ steps.range.outputs.base }}"; HEAD="${{ steps.range.outputs.head }}"
+          git -c user.name="neoffice-fork-bot" -c user.email="fork-bot@neoffice.ch" commit -q \
+            -m "chore(fork): //// markers for ${BASE:0:10}..${HEAD:0:10} [skip ci]" \
+            -m "Comment-only, written by the fork-markers workflow (bvisible/neoffice-ci) from the commit messages of the range. TO REVIEW markers need a human reason."
+          for i in 1 2 3; do
+            git push origin "HEAD:${{ github.ref_name }}" && break
+            git -c user.name="neoffice-fork-bot" -c user.email="fork-bot@neoffice.ch" pull --rebase origin "${{ github.ref_name }}" || exit 1
+          done
+          echo "new_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "pushed $(git rev-parse --short HEAD)"
+
+      - name: Re-check after the pass
+        if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
+        run: |
+          set +e
+          python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "$(git rev-parse HEAD)" | tee /tmp/fm/recheck.txt
+          RC=$?
+          { echo; echo "### After the marker pass"; echo; echo '```'; cat /tmp/fm/recheck.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ $RC -eq 0 ] || { echo "::error::hunks still unmarked after the pass — a human must mark them"; exit 1; }
