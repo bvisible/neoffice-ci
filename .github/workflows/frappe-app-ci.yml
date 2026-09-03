@@ -43,6 +43,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_build:
+        description: "Commit-the-build SPA forks (pos_next, raven, wiki, helpdesk, crm, mint, builder…): their assets are committed, never built on instances — get-app with --skip-assets (no yarn install of the frontend toolchain) and no blocking build step."
+        required: false
+        type: boolean
+        default: false
     secrets:
       CI_REPORT_SECRET:
         required: true
@@ -149,7 +154,11 @@ jobs:
       - name: Get app under test
         working-directory: /home/runner/frappe-bench
         run: |
-          bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
+          if [ "${{ inputs.skip_build }}" = "true" ]; then
+            bench get-app --skip-assets ${{ inputs.app }} "$GITHUB_WORKSPACE"
+          else
+            bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
+          fi
           bench setup requirements --dev
           # Several fleet suites import pytest at module level (pytest-style
           # files next to unittest ones): without it in the env, frappe's
@@ -188,6 +197,7 @@ jobs:
           bench --site test_site execute erpnext.setup.utils.before_tests
 
       - name: Build (blocking — an app that does not build must not ship)
+        if: inputs.skip_build != true
         working-directory: /home/runner/frappe-bench
         run: bench build --app ${{ inputs.app }}
 
