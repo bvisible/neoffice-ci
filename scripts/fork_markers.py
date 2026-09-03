@@ -37,8 +37,11 @@ HASH_COMMENT = {".py", ".pyi", ".yml", ".yaml", ".toml", ".txt", ".cfg", ".ini",
 SLASH_COMMENT = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue", ".scss", ".css", ".less", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".swift", ".kt", ".php"}
 MARKUP_COMMENT = {".html", ".htm", ".xml", ".svg", ".md", ".jinja", ".j2", ".hbs", ".mustache", ".vue"}
 NOT_COMMENTABLE = {".json", ".po", ".pot", ".mo", ".csv", ".lock", ".map", ".min.js", ".min.css", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".svgz", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".pdf", ".zip", ".gz", ".wasm", ".pyc"}
-SKIP_DIRS = ("/dist/", "/node_modules/", "/__pycache__/", "/.git/", "/build/", "/public/frontend/", "/public/dist/", "/locale/", "/translations/")
-SKIP_FILES = ("yarn.lock", "package-lock.json", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", MANIFEST)
+SKIP_DIRS = ("/dist/", "/node_modules/", "/__pycache__/", "/.git/", "/build/", "/public/frontend/", "/public/dist/", "/locale/", "/translations/", "/.github/")
+SKIP_FILES = ("yarn.lock", "package-lock.json", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", MANIFEST, "manifest.json", "version.json", "sw.js", "registerSW.js")
+# Built SPA output committed by the build bots (commit-the-build forks): vite hashes its chunks,
+# workbox ships its runtime, and none of it is source anyone marks.
+_BUILT_ASSET = re.compile(r"(/public/[^/]+/assets/|/public/[^/]+/(index|sw|workbox)[-.][^/]*\.(js|css)$|-[A-Za-z0-9_]{8}\.(js|css)(\.map)?$|/workbox-[^/]+\.js$)")
 
 
 def sh(*args: str, cwd: str | None = None) -> str:
@@ -56,7 +59,7 @@ def ext_of(path: str) -> str:
 def kind_of(path: str) -> str:
     """'hash' | 'slash' | 'markup' | 'none' | 'skip'"""
     low = "/" + path.lower()
-    if any(d in low for d in SKIP_DIRS) or os.path.basename(path) in SKIP_FILES:
+    if any(d in low for d in SKIP_DIRS) or os.path.basename(path) in SKIP_FILES or _BUILT_ASSET.search("/" + path):
         return "skip"
     e = ext_of(path)
     if e in NOT_COMMENTABLE or e in (".bundle.js", ".bundle.css"):
