@@ -63,6 +63,23 @@ on:
         required: false
         type: string
         default: "22"
+      parallel_runner:
+        description: >-
+          Run the suite with `bench run-parallel-tests --total-builds 1` instead of `run-tests --app`.
+          Same discovery, same tests, ONE difference that matters on a big suite: the parallel runner
+          isolates each test FILE — it re-asserts frappe.session.user = Administrator and it creates the
+          file's test records with commit=True. `run-tests --app` does neither: it builds every test
+          record of the app in ONE uncommitted transaction, and frappe's make_test_objects() calls
+          frappe.db.rollback() the moment a record already exists — which throws away every record
+          created before it (hrms lost Employee _T-Employee-00002 and Shift Type "Day Shift" that way);
+          and a test that ends on frappe.set_user("someone@example.com") leaks that user into the
+          setUpClass of the NEXT file (hrms: PermissionError on create_company). Upstream hrms is only
+          ever validated under the parallel runner (`--total-builds 2` in frappe/hrms ci.yml), so this
+          is its designed mode, not a relaxation. Needs `<app>/tests/__init__.py` (the runner imports
+          `<app>.tests` for global_test_dependencies) and ignores `no_tests` module flags.
+        required: false
+        type: boolean
+        default: false
     secrets:
       CI_REPORT_SECRET:
         required: true
@@ -307,12 +324,27 @@ jobs:
           PY
 
       - name: Run tests
-        if: "!startsWith(inputs.test_args, '--debug-records')"
+        if: "!startsWith(inputs.test_args, '--debug-records') && !inputs.parallel_runner"
         working-directory: /home/runner/frappe-bench
         run: |
           bench --site test_site set-config allow_tests true
           set -o pipefail
           bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee /tmp/test-output.log
+        env:
+          TYPE: server
+          CI: "Yes"
+
+      - name: Run tests (parallel runner, one chunk — per-file isolation)
+        # Same files, same tests: --total-builds 1 puts everything in one chunk.
+        # What changes is isolation — see the `parallel_runner` input above. The
+        # runner exits 1 on failure only when CI is set in the environment.
+        if: "!startsWith(inputs.test_args, '--debug-records') && inputs.parallel_runner"
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench --site test_site set-config allow_tests true
+          set -o pipefail
+          bench --site test_site run-parallel-tests --app ${{ inputs.app }} \
+            --total-builds 1 --build-number 1 2>&1 | tee /tmp/test-output.log
         env:
           TYPE: server
           CI: "Yes"
