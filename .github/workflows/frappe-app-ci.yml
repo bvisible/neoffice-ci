@@ -323,6 +323,40 @@ jobs:
           frappe.db.commit()
           PY
 
+      - name: Serve host_name so wkhtmltopdf can fetch what a print format links
+        # scrub_urls() turns every relative href/src of a print format into an absolute
+        # URL on host_name — a salary slip links http://127.0.0.1:8000/print.bundle.css —
+        # and wkhtmltopdf aborts the whole render on a resource it cannot reach
+        # (--load-error-handling defaults to abort). frappe's get_pdf() only tolerates
+        # ContentNotFoundError & co, never a network error, so `frappe.attach_print` died
+        # in CI with "ConnectionRefusedError" (with host_name set) or "HostNotFoundError"
+        # (without it) — 9 hrms tests. Nothing serves the site during `bench run-tests`,
+        # so answer 200/empty to everything: it removes the network error without hiding
+        # anything asserted — these tests check that a PDF was produced and mailed, never
+        # what it looks like. An instance never hits this: nginx serves the assets.
+        if: "!startsWith(inputs.test_args, '--debug-records')"
+        run: |
+          nohup python3 - >/dev/null 2>&1 <<'PY' &
+          import http.server, socketserver
+          class H(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.0"
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/plain")
+                  self.send_header("Content-Length", "0")
+                  self.end_headers()
+              do_HEAD = do_GET
+              def log_message(self, *a):
+                  pass
+          socketserver.TCPServer.allow_reuse_address = True
+          socketserver.TCPServer(("127.0.0.1", 8000), H).serve_forever()
+          PY
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null http://127.0.0.1:8000/ping && break
+            sleep 0.5
+          done
+          curl -sf -o /dev/null http://127.0.0.1:8000/ping && echo "asset stub up on 127.0.0.1:8000"
+
       - name: Run tests
         if: "!startsWith(inputs.test_args, '--debug-records') && !inputs.parallel_runner"
         working-directory: /home/runner/frappe-bench
