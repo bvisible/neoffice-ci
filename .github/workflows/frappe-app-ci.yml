@@ -189,6 +189,8 @@ jobs:
           bench --site test_site set-config mail_server smtp.example.com
           bench --site test_site set-config mail_login test@example.com
           bench --site test_site set-config mail_password test
+          # frappe throttles User creation at 60/min (throttle_user_creation); hrms tests create more
+          bench --site test_site set-config throttle_user_limit 1000
           # hrms creates the "Employee Self Service" User Type, whose install
           # validates a per-type doctype limit in site config and dies without
           # it ("The limit has not set for the user type…").
