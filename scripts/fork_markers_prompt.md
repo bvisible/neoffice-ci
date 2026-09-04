@@ -15,6 +15,7 @@ For each unmarked hunk listed below, insert a marker comment immediately above t
 - The reason comes from the commit message. Cite the short sha and subject: `(abc1234 "subject")`. When the message states no usable reason, write `//// Neoffice — TO REVIEW: "<subject>" (sha) — reason not stated in the commit`. Never invent a reason.
 - A file already carrying a marker for the same change needs nothing more.
 - Files that cannot carry comments (JSON, images, .po/.mo, lockfiles): do not edit them. Instead append one line per file to `NEOFFICE_FORK_MARKERS.md` at the repository root — create it with the title `# Neoffice fork markers` if missing — under a `## Auto-marked (fork-markers workflow)` heading: `- \`path\` — <what changed, e.g. the fields added> — <reason> (sha "subject")`.
+- In `.html`/Jinja templates never write the sequence `.__` (dot + two underscores), `__class__`, `{{` or `{%` inside a marker: Frappe's `safe_render` refuses the whole page (HTTP 417) when its source contains them, comments included.
 - Do not touch anything not listed. Do not run git. English only inside files. When done, answer with one line per file you changed.
 
 ## Commits of the range (the source of the reasons)

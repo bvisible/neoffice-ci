@@ -187,6 +187,10 @@ def verify(repo: str, base: str, verbose: bool) -> list[str]:
             for a in h["added"]:
                 if kind in ("none", "skip") or not is_comment_line(kind, a):
                     problems.append(f"{path}:{h['new_start']}: added non-comment line: {a[:120]}")
+                # frappe.utils.jinja.safe_render refuses a template whose SOURCE contains ".__"
+                # (anti-SSTI), comments included: a marker quoting it took /raven down with a 417.
+                elif path.lower().endswith((".html", ".htm", ".jinja", ".j2")) and ".__" in a:
+                    problems.append(f"{path}:{h['new_start']}: '.__' in a template comment (safe_render would answer 417): {a[:120]}")
     for p in problems:
         print("NOT COMMENT-ONLY  " + p)
     print(f"verify: {'OK — comments only' if not problems else str(len(problems)) + ' problem(s)'}")
