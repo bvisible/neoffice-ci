@@ -48,6 +48,11 @@ on:
         required: false
         type: boolean
         default: false
+      build_frappe_assets:
+        description: "Run `bench build --app frappe` before the tests. The bench is initialised with --skip-assets, so it has no sites/assets/assets.json; frappe's bundled_asset() reads that manifest without a guard, and any render of a frappe web template (a 404, an error page) then dies on \"'NoneType' object has no attribute 'get'\". Set it for a suite that renders web pages — builder's page tests assert the 404 of an unpublished page. The fleet never hits it: the update pipeline builds frappe on every instance at every update."
+        required: false
+        type: boolean
+        default: false
       erpnext_bootstrap:
         description: "Run erpnext's own before_tests (setup wizard, test company) after the install. Default true; set false for an app whose own before_tests hook already completes the setup — hrms — or the two bootstraps fight over the default company."
         required: false
@@ -217,6 +222,18 @@ jobs:
           # bootstrap explicitly instead, so no app needs a hook for CI.
           bench --site test_site set-config allow_tests true
           bench --site test_site execute erpnext.setup.utils.before_tests
+
+      - name: Build frappe assets (suites that render frappe web templates)
+        if: inputs.build_frappe_assets
+        working-directory: /home/runner/frappe-bench
+        # `bench init --skip-assets` above leaves the bench with no
+        # sites/assets/assets.json, and frappe's bundled_asset() does
+        # `get_assets_json().get(path)` with no guard: rendering ANY page that
+        # goes through frappe's base.html — a 404, an error page — dies on
+        # "'NoneType' object has no attribute 'get'". No instance ever sees this
+        # (the update pipeline builds frappe on every instance, every update), so
+        # it only shows up here, and only for a suite that renders web pages.
+        run: bench build --app frappe
 
       - name: Build (blocking — an app that does not build must not ship)
         if: inputs.skip_build != true
