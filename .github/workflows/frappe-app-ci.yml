@@ -112,8 +112,9 @@ jobs:
             ${{ runner.os }}-pip-${{ inputs.app }}-
             ${{ runner.os }}-pip-
 
-      - name: Install MariaDB client
-        run: sudo apt-get update -q && sudo apt-get install -yq mariadb-client
+      - name: Install MariaDB client and wkhtmltopdf
+        # wkhtmltopdf: frappe.attach_print / get_pdf need it (hrms mails a PDF on Salary Slip submit)
+        run: sudo apt-get update -q && sudo apt-get install -yq mariadb-client wkhtmltopdf
 
       - name: Init bench (bvisible/frappe version-15 — the fleet's frappe)
         run: |
