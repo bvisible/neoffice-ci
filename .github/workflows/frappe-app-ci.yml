@@ -38,6 +38,11 @@ on:
         type: string
         required: false
         default: ""
+      pytest_blocking:
+        description: "Make the pytest pass gate the job (default: informative only). Flip it once the pytest suites are hardened (#104)."
+        required: false
+        type: boolean
+        default: false
       pytest_paths:
         description: "App-relative test paths to ALSO run under pytest (informative, non-blocking) — for suites the frappe runner cannot discover (module-level test functions)"
         required: false
@@ -390,20 +395,25 @@ jobs:
           TYPE: server
           CI: "Yes"
 
-      - name: Pytest (informative — measures suites invisible to the frappe runner)
+      - name: Pytest (suites invisible to the frappe runner — blocking when pytest_blocking)
         if: inputs.pytest_paths != '' && !startsWith(inputs.test_args, '--debug-records')
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.pytest_blocking }}
         working-directory: /home/runner/frappe-bench/sites
         run: |
           # The frappe runner only discovers unittest classes; module-level
           # test functions (pytest style) never run under it. This pass makes
-          # them visible WITHOUT gating the job — once their real state is
-          # known and hardened, flip it to blocking.
+          # them visible; with pytest_blocking it gates the job. The exit
+          # status must survive the `tail` (pipefail), and --tb=short keeps
+          # the cause of an error in the log (--tb=line hid the fixture
+          # errors of #104 for four days).
+          set -o pipefail
           ../env/bin/pip install --quiet pytest
+          rc=0
           for p in ${{ inputs.pytest_paths }}; do
             echo "==== pytest $p"
-            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=line 2>&1 | tail -30
+            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=short 2>&1 | tail -80 || rc=1
           done
+          exit $rc
 
       - name: Report to the fleet tracker (via the hub)
         # success() || failure() and not always(): a cancelled run (superseded
