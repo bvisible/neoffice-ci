@@ -118,6 +118,11 @@ jobs:
         env:
           HUB: https://neoservice.neoffice.me/api/method/neoffice_devops.github.ci.last_green
           CI_SECRET: ${{ secrets.CI_REPORT_SECRET }}
+          # Read-only PAT already used to clone the private fork deps. Here it only
+          # asks when bvisible/frappe last moved: an app whose own tree is unchanged
+          # must still be re-tested when the framework under it changed, or the gate
+          # would hide exactly the kind of breakage the parity backports fixed.
+          FLEET_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
@@ -158,6 +163,26 @@ jobs:
           age_days=$(( ( $(date -u +%s) - last_epoch ) / 86400 ))
           if [ "$age_days" -ge "$MAX_AGE_DAYS" ] || [ "$age_days" -lt 0 ]; then
             decide true "last green run is ${age_days}d old (floor ${MAX_AGE_DAYS}d) — replaying to catch drift"
+          fi
+
+          # The app's own tree is unchanged — but it is tested ON our frappe fork.
+          # If the framework moved since the green run, this app has not been proven
+          # against it. Unknown answer (no token, API down) => run.
+          if [ -z "$FLEET_TOKEN" ]; then
+            decide true "no FLEET_READ_TOKEN — cannot tell whether the framework moved, running"
+          fi
+          if true; then
+            frappe_at=$(curl -sS --max-time 20 -H "Authorization: Bearer $FLEET_TOKEN" \
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/repos/bvisible/frappe/commits/version-15" 2>/dev/null \
+                        | python3 -c "import json,sys; print(json.load(sys.stdin)['commit']['committer']['date'])" 2>/dev/null)
+            if [ -z "$frappe_at" ]; then
+              decide true "could not read when bvisible/frappe last moved — running"
+            fi
+            frappe_epoch=$(date -u -d "$frappe_at" +%s 2>/dev/null)
+            if [ -z "$frappe_epoch" ] || [ "$frappe_epoch" -gt "$last_epoch" ]; then
+              decide true "bvisible/frappe moved on ${frappe_at:0:10}, after this app's green run — running"
+            fi
           fi
 
           decide false "nothing changed since the green run of ${last_at:0:10} on ${SHA:0:10} (${age_days}d ago) — skipped, no minutes spent"
