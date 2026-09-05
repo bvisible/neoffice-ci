@@ -8,7 +8,7 @@ For each unmarked hunk listed below, insert a marker comment immediately above t
 
 ## Hard constraints
 - Add comment lines only. Never add, edit, move, reindent or delete any non-comment line. Never reformat a file.
-- Syntax by language: Python, YAML, TOML, shell → `#//// Neoffice — …` · JS, TS, Vue `<script>`, SCSS → `//// Neoffice — …` · plain CSS → `/* //// Neoffice — … */` · Jinja templates (`templates/`, `www/`) → `{# //// Neoffice — … #}` · plain HTML / Vue `<template>` → `<!-- //// Neoffice — … -->`. Match the indentation of the line below the marker.
+- Syntax by language: Python, YAML, TOML, shell → `# //// Neoffice — …` · JS, TS, Vue `<script>`, SCSS → `//// Neoffice — …` · plain CSS → `/* //// Neoffice — … */` · Jinja templates (`templates/`, `www/`) → `{# //// Neoffice — … #}` · plain HTML / Vue `<template>` → `<!-- //// Neoffice — … -->`. Match the indentation of the line below the marker.
 - Never inside a string, a template literal, an HTML attribute, a `<script>`/`<style>` block (use the JS/CSS syntax there), a JSON value, or between a decorator and its `def`.
 - One marker per hunk. For a block longer than about 30 lines open with `//// Neoffice ▼▼▼ — …` and close with `//// Neoffice ▲▲▲` (same comment syntax as the file).
 - For a hunk that only removed lines, put the marker where the lines were: `//// Neoffice — removed <what> (sha "subject"): <why>`.
