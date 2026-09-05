@@ -27,7 +27,8 @@ for line in diff.splitlines():
     if line.startswith("-"): removed.append(line[1:])
     elif line.startswith("+"): added.append(line[1:])
 assert len(removed) == len(added), (len(removed), len(added))
-bad = [(r, a) for r, a in zip(removed, added) if r.replace("#////", "# ////") != a]
+# only the comment-opening marker is respelled: a second `#////` quoted inside the comment text stays
+bad = [(r, a) for r, a in zip(removed, added) if r.replace("#////", "# ////", 1) != a]
 if bad:
     print("NOT A PURE MARKER RESPELL:", bad[:3]); sys.exit(1)
 print(f"  preuve: {len(added)} lignes, toutes = respelling du marqueur")
