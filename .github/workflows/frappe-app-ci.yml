@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: ""
+      app_ref:
+        description: "Git ref of the app to test instead of the calling sha (a PR branch tested from version-15's workflow file)"
+        type: string
+        required: false
+        default: ""
       pytest_paths:
         description: "App-relative test paths to ALSO run under pytest (informative, non-blocking) — for suites the frappe runner cannot discover (module-level test functions)"
         required: false
@@ -113,6 +118,8 @@ jobs:
     steps:
       - name: Clone app under test
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.app_ref || github.sha }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
