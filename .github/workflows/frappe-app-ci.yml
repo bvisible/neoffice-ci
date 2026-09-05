@@ -98,7 +98,76 @@ on:
         required: false
 
 jobs:
+  # A nightly on an app nobody touched proves nothing and costs ~12 minutes of the
+  # account's Actions allowance. This gate asks the hub what was last proven green
+  # and skips the heavy job when the tree has not moved since. It asks the HUB and
+  # not GitHub on purpose: the callers' token is `contents: read` only, so a job
+  # requesting `actions: read` is refused at startup (measured, 2026-09-05).
+  # It FAILS OPEN everywhere: only a `schedule` event can ever be skipped, and any
+  # doubt — no answer, no secret, no history, unparseable date — runs the tests.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    name: gate (${{ inputs.app }})
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      reason: ${{ steps.decide.outputs.reason }}
+    steps:
+      - name: Has anything changed since the last green run?
+        id: decide
+        env:
+          HUB: https://neoservice.neoffice.me/api/method/neoffice_devops.github.ci.last_green
+          CI_SECRET: ${{ secrets.CI_REPORT_SECRET }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          # A green run older than this is replayed even with no new commit, so drift
+          # in the frappe/erpnext forks, the runner image or a dependency still gets
+          # caught. One week: replaying every app weekly costs almost nothing.
+          MAX_AGE_DAYS: '7'
+        run: |
+          set +e
+          decide() { echo "run=$1" >> "$GITHUB_OUTPUT"; echo "reason=$2" >> "$GITHUB_OUTPUT"; echo "$2"; echo "- **$2**" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+
+          if [ "$EVENT" != "schedule" ]; then
+            decide true "event is $EVENT — always runs (only scheduled runs can be skipped)"
+          fi
+          if [ -z "$CI_SECRET" ]; then
+            decide true "no CI_REPORT_SECRET on this repo — cannot ask the hub, running"
+          fi
+
+          resp=$(curl -sS --max-time 20 -X POST "$HUB" \
+                 --data-urlencode "secret=$CI_SECRET" \
+                 --data-urlencode "repo=$REPO" \
+                 --data-urlencode "ref=$BRANCH" 2>/dev/null)
+          last_sha=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('message',{}).get('sha',''))" 2>/dev/null)
+          last_at=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('message',{}).get('at',''))" 2>/dev/null)
+
+          if [ -z "$last_sha" ]; then
+            decide true "the hub knows no green run for $REPO@$BRANCH (or did not answer) — running"
+          fi
+          if [ "$last_sha" != "$SHA" ]; then
+            decide true "new commits since the last green run (${last_sha:0:10} -> ${SHA:0:10}) — running"
+          fi
+
+          last_epoch=$(date -u -d "$last_at" +%s 2>/dev/null)
+          if [ -z "$last_epoch" ]; then
+            decide true "could not read the date of the last green run ('$last_at') — running"
+          fi
+          age_days=$(( ( $(date -u +%s) - last_epoch ) / 86400 ))
+          if [ "$age_days" -ge "$MAX_AGE_DAYS" ] || [ "$age_days" -lt 0 ]; then
+            decide true "last green run is ${age_days}d old (floor ${MAX_AGE_DAYS}d) — replaying to catch drift"
+          fi
+
+          decide false "nothing changed since the green run of ${last_at:0:10} on ${SHA:0:10} (${age_days}d ago) — skipped, no minutes spent"
+
   tests:
+    needs: gate
+    # Fail open here too: only an EXPLICIT 'false' skips. A gate that errored, timed
+    # out or returned nothing leaves the output empty, and the tests run — losing a
+    # nightly silently would be worse than the minutes it saves.
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     name: build + tests (${{ inputs.app }})
