@@ -275,6 +275,58 @@ jobs:
           mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
           mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
 
+      # Upstream v15 does not export UnitTestCase / IntegrationTestCase — they are
+      # v16 names. Our fork adds them (a shim resolving both to its v15
+      # FrappeTestCase), and that shim travels WITH us to the merge: it is not a
+      # cost of the upgrade. Without it here, crm / builder / lms / helpdesk and
+      # suite died at test collection every single week on an ImportError, before
+      # running one line — five red [CI amont] issues a Monday that said nothing
+      # about upstream, and that would have buried the real signal the day it
+      # appears. Read from our fork rather than copied here, so the two cannot
+      # drift; skipped, loudly, if upstream ever grows its own.
+      - name: Upstream preview — carry our v16 test-base-class shim
+        if: ${{ inputs.upstream_preview == true }}
+        env:
+          FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os, sys, urllib.request
+
+          target = os.path.expanduser("~/frappe-bench/apps/frappe/frappe/tests/__init__.py")
+          current = open(target, encoding="utf-8").read()
+
+          if "IntegrationTestCase" in current and "UnitTestCase" in current:
+              print("upstream already exports both names — nothing to carry")
+              sys.exit(0)
+          if "def __getattr__(" in current:
+              print("::warning::upstream defines its own module __getattr__ — shim NOT applied; "
+                    "the collection errors below are real and need a look")
+              sys.exit(0)
+
+          token = os.environ.get("FLEET_READ_TOKEN", "")
+          url = "https://api.github.com/repos/bvisible/frappe/contents/frappe/tests/__init__.py?ref=version-15"
+          headers = {"Accept": "application/vnd.github.raw"}
+          if token:
+              headers["Authorization"] = "Bearer " + token
+          ours = urllib.request.urlopen(
+              urllib.request.Request(url, headers=headers), timeout=30
+          ).read().decode("utf-8")
+
+          marker = "# //// Neoffice — v16 test base-class names"
+          i = ours.find(marker)
+          if i == -1:
+              print("::warning::shim marker not found in our fork — nothing carried")
+              sys.exit(0)
+          shim = ours[i:]
+          if "def __getattr__(" not in shim:
+              print("::warning::shim looks truncated (no __getattr__) — nothing carried")
+              sys.exit(0)
+
+          with open(target, "a", encoding="utf-8") as fh:
+              fh.write("\n\n" + shim)
+          print("carried %d chars of shim onto upstream frappe.tests" % len(shim))
+          PY
+
       - name: Get dependency apps
         if: inputs.install_apps != ''
         working-directory: /home/runner/frappe-bench
