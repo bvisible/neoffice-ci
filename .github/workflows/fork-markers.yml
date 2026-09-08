@@ -6,6 +6,11 @@ name: Fork markers (reusable)
 # if it is comment-only (scripts/fork_markers.py verify) and still compiles; it is
 # pushed back by neoffice-fork-bot with [skip ci]. Anything left unmarked fails
 # the run so a human sees it.
+#
+# The range is the SERIES, not the push (neoffice-maintenance#293): refs/fork-markers/clean
+# is the last head this workflow found, or made, clean, and the check runs from there. A
+# change and its later undoing cancel out; judged push by push, the undoing was flagged
+# and the marker pass could never converge. Docstrings count as comments (fork_markers.py).
 on:
   workflow_call:
     inputs:
@@ -64,6 +69,13 @@ jobs:
              || ! git cat-file -e "$BASE^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$BASE" "$HEAD" 2>/dev/null; then
             BASE=$(git rev-parse "$HEAD~1" 2>/dev/null || echo "$HEAD")   # first commit of a repo: nothing to compare
           fi
+          # the series, not the push (#293): from the last clean state when there is one
+          git fetch -q origin '+refs/fork-markers/clean:refs/fork-markers/clean' 2>/dev/null || true
+          ANCHOR=$(git rev-parse -q --verify refs/fork-markers/clean 2>/dev/null || true)
+          if [ -n "$ANCHOR" ] && [ "$ANCHOR" != "$HEAD" ] && git merge-base --is-ancestor "$ANCHOR" "$HEAD" 2>/dev/null; then
+            echo "anchor: last clean state ${ANCHOR:0:10} (refs/fork-markers/clean)"
+            BASE="$ANCHOR"
+          fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"; echo "head=$HEAD" >> "$GITHUB_OUTPUT"
           echo "range: $BASE..$HEAD"
 
@@ -79,9 +91,9 @@ jobs:
           echo "has_token=$HAS" >> "$GITHUB_OUTPUT"
           { echo "### Fork markers — \`${{ steps.range.outputs.base }}\`..\`${{ steps.range.outputs.head }}\`"; echo; echo '```'; cat /tmp/fm/check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Every changed hunk carries a marker
+      - name: Every changed hunk carries a marker — remember this clean state
         if: steps.check.outputs.unmarked == '0'
-        run: echo "nothing to do"
+        run: git push -q origin "${{ steps.range.outputs.head }}:refs/fork-markers/clean" --force || echo "::warning::could not move refs/fork-markers/clean"
 
       - name: Too many unmarked hunks for an automatic pass
         if: steps.check.outputs.unmarked != '0' && fromJSON(steps.check.outputs.unmarked) > fromJSON(inputs.max_hunks)
@@ -184,3 +196,4 @@ jobs:
           RC=${PIPESTATUS[0]}
           { echo; echo "### After the marker pass"; echo; echo '```'; cat /tmp/fm/recheck.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ $RC -eq 0 ] || { echo "::error::hunks still unmarked after the pass — a human must mark them"; exit 1; }
+          git push -q origin "HEAD:refs/fork-markers/clean" --force || echo "::warning::could not move refs/fork-markers/clean"

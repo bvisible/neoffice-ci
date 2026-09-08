@@ -16,18 +16,23 @@ workflow of bvisible/neoffice-ci.
 
 A hunk counts as marked when one of its added lines carries `////`, or when the new file
 has a `////` line within LOOKBACK lines above the hunk (a marker placed just before the
-change). A hunk made only of comment lines is a marker itself, never flagged. Files that
-cannot carry comments (JSON, PO/MO, images, lockfiles, built assets) are flagged unless
-NEOFFICE_FORK_MARKERS.md at HEAD names their path.
+change). A hunk made only of comment lines is a marker itself, never flagged — and in a
+Python file a docstring counts as a comment: it cannot carry a `#` marker, and the lines
+above it are more docstring, so no placement could ever satisfy the check
+(neoffice-maintenance#293). Files that cannot carry comments (JSON, PO/MO, images,
+lockfiles, built assets) are flagged unless NEOFFICE_FORK_MARKERS.md at HEAD names their
+path.
 """
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tokenize
 
 MARK = "////"
 LOOKBACK = 3
@@ -90,25 +95,28 @@ def is_comment_line(kind: str, line: str) -> bool:
 
 
 def parse_diff(diff: str):
-    """Yield (path, [hunk]) from a `git diff -U0` output. hunk = dict(new_start, new_count, old_count, added, removed)."""
+    """Yield (path, [hunk]) from a `git diff -U0` output. hunk = dict(old_start, old_count, new_start, new_count, added, removed)."""
     files = []
     cur = None
     for line in diff.splitlines():
         if line.startswith("diff --git "):
-            cur = {"path": None, "hunks": [], "binary": False}
+            cur = {"path": None, "old_path": None, "hunks": [], "binary": False}
             files.append(cur)
         elif cur is None:
             continue
+        elif line.startswith("--- "):
+            cur["old_path"] = None if line[4:] == "/dev/null" else line[6:] if line.startswith("--- a/") else line[4:]
         elif line.startswith("+++ "):
             cur["path"] = None if line[4:] == "/dev/null" else line[6:] if line.startswith("+++ b/") else line[4:]
         elif line.startswith("Binary files"):
             cur["binary"] = True
         elif line.startswith("@@"):
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+            old_start = int(m.group(1))
             old_count = int(m.group(2)) if m.group(2) is not None else 1
             new_start = int(m.group(3))
             new_count = int(m.group(4)) if m.group(4) is not None else 1
-            cur["hunks"].append({"new_start": new_start, "new_count": new_count, "old_count": old_count, "added": [], "removed": []})
+            cur["hunks"].append({"old_start": old_start, "old_count": old_count, "new_start": new_start, "new_count": new_count, "added": [], "removed": []})
         elif cur["hunks"]:
             h = cur["hunks"][-1]
             if line.startswith("+"):
@@ -123,6 +131,33 @@ def head_lines(head: str, path: str, repo: str) -> list[str]:
         return sh("git", "show", f"{head}:{path}", cwd=repo).splitlines()
     except subprocess.CalledProcessError:
         return []
+
+
+def docstring_lines(lines: list[str]) -> set[int]:
+    """1-based numbers of the lines covered by bare string statements — docstrings — in a Python file.
+
+    A docstring cannot carry a `#` marker and the LOOKBACK lines above it are more docstring, so a
+    docstring edit in a fork file could never pass the check, and the marker pass could never make
+    it pass (neoffice-maintenance#293). Documentation is not code: those lines count as comments.
+    Only bare string STATEMENTS qualify; a string assigned or passed (an SQL query, a template) is
+    code and stays subject to the rule. A file tokenize cannot read yields nothing: back to strict.
+    """
+    covered: set[int] = set()
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO("\n".join(lines) + "\n").readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return covered
+    statement_start = (None, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
+    prev = None
+    for i, tok in enumerate(toks):
+        if tok.type in (tokenize.NL, tokenize.COMMENT):
+            continue
+        if tok.type == tokenize.STRING and prev in statement_start:
+            following = next((t.type for t in toks[i + 1:] if t.type not in (tokenize.NL, tokenize.COMMENT)), None)
+            if following in (tokenize.NEWLINE, tokenize.ENDMARKER, None):
+                covered.update(range(tok.start[0], tok.end[0] + 1))
+        prev = tok.type
+    return covered
 
 
 def marker_nearby(lines: list[str], new_start: int, new_count: int) -> bool:
@@ -148,21 +183,26 @@ def check(repo: str, base: str, head: str, verbose: bool):
                 unmarked.append({"file": path, "kind": "not-commentable", "new_start": 0, "new_count": 0, "why": f"no comment syntax — needs an entry naming the path in {MANIFEST}", "snippet": []})
             continue
         lines = head_lines(head, path, repo)
+        python = kind == "hash" and path.lower().endswith((".py", ".pyi"))
+        doc_head = docstring_lines(lines) if python else set()
+        doc_base = None  # the BASE file is only read when a hunk removes lines
         for h in f["hunks"]:
             added, removed = h["added"], h["removed"]
-            code_added = [a for a in added if not is_comment_line(kind, a)]
-            if not code_added and not removed:
-                continue  # comment-only hunk: a marker, or documentation
+            # in a -U0 hunk the added lines sit at new_start.., the removed ones at old_start..
+            code_added = [a for i, a in enumerate(added) if not is_comment_line(kind, a) and (h["new_start"] + i) not in doc_head]
+            if removed and doc_base is None:
+                doc_base = docstring_lines(head_lines(base, f["old_path"] or path, repo)) if python else set()
+            code_removed = [r for j, r in enumerate(removed) if not is_comment_line(kind, r) and (h["old_start"] + j) not in (doc_base or set())]
+            if not code_added and not code_removed:
+                continue  # comments, blanks or docstrings only: a marker, or documentation
             if any(MARK in a for a in added):
                 continue
             if marker_nearby(lines, h["new_start"], h["new_count"]):
                 continue
-            if not code_added and removed and all(is_comment_line(kind, r) for r in removed):
-                continue  # only comments changed
             unmarked.append({
                 "file": path, "kind": "removed-only" if not added else "modified" if removed else "added",
                 "new_start": h["new_start"], "new_count": h["new_count"], "old_count": h["old_count"],
-                "snippet": (code_added or removed)[:3],
+                "snippet": (code_added or code_removed)[:3],
                 "why": "no `////` marker in the hunk nor within %d lines above it" % LOOKBACK,
             })
     if verbose or True:
