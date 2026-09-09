@@ -29,6 +29,7 @@ import argparse
 import io
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -41,6 +42,10 @@ MANIFEST = "NEOFFICE_FORK_MARKERS.md"
 HASH_COMMENT = {".py", ".pyi", ".yml", ".yaml", ".toml", ".txt", ".cfg", ".ini", ".sh", ".bash", ".gitignore", ".dockerignore", ".conf", ".rb", ".pl", ".r"}
 SLASH_COMMENT = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue", ".scss", ".css", ".less", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".swift", ".kt", ".php"}
 MARKUP_COMMENT = {".html", ".htm", ".xml", ".svg", ".md", ".jinja", ".j2", ".hbs", ".mustache", ".vue"}
+# SQL comments with `--` (and `#` on MariaDB, and /* */): the schema files of a fork carry markers
+# like any other source. Classing them "not commentable" sent every marked line of
+# framework_mariadb.sql to the manifest and kept the run red for nothing.
+SQL_COMMENT = {".sql"}
 NOT_COMMENTABLE = {".json", ".po", ".pot", ".mo", ".csv", ".lock", ".map", ".min.js", ".min.css", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".svgz", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".pdf", ".zip", ".gz", ".wasm", ".pyc"}
 SKIP_DIRS = ("/dist/", "/node_modules/", "/__pycache__/", "/.git/", "/build/", "/public/frontend/", "/public/dist/", "/locale/", "/translations/", "/.github/")
 SKIP_FILES = ("yarn.lock", "package-lock.json", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", MANIFEST, "manifest.json", "version.json", "sw.js", "service-worker.js", "registerSW.js")
@@ -75,6 +80,8 @@ def kind_of(path: str) -> str:
         return "slash"
     if e in MARKUP_COMMENT:
         return "markup"
+    if e in SQL_COMMENT:
+        return "sql"
     if e == "":
         return "hash"  # scripts without extension, Makefile-like files
     return "none"
@@ -84,6 +91,7 @@ _COMMENT_RE = {
     "hash": re.compile(r"^\s*(#.*)?$"),
     "slash": re.compile(r"^\s*(//.*|/\*.*|\*.*|\*/.*)?$"),
     "markup": re.compile(r"^\s*(<!--.*|-->.*|\{#.*|#\}.*|//.*|/\*.*|\*.*|\*/.*)?$"),
+    "sql": re.compile(r"^\s*(--.*|#.*|/\*.*|\*.*|\*/.*)?$"),
 }
 
 
@@ -92,6 +100,51 @@ def is_comment_line(kind: str, line: str) -> bool:
         return True
     rx = _COMMENT_RE.get(kind)
     return bool(rx and rx.match(line))
+
+
+_BLOCK_DELIMS = {
+    "slash": (("/*", "*/"),),
+    "markup": (("<!--", "-->"), ("{#", "#}"), ("/*", "*/")),
+    "sql": (("/*", "*/"),),
+}
+
+
+def block_comment_lines(lines: list[str], kind: str) -> set[int]:
+    """1-based numbers of the lines that sit INSIDE a block comment.
+
+    A `/* … */` (or `<!-- … -->`, `{# … #}`) marker spans several lines, and its middle lines
+    start with ordinary words. The line regex only recognises a line that OPENS or continues with
+    a delimiter, so the marker pass wrote a perfectly good multi-line comment and its own verifier
+    then called it code — every push to builder went red and no marker was ever written
+    (neoffice-maintenance#205, 2026-09-09). Membership in a block is what makes a line a comment,
+    not how it happens to start.
+    """
+    covered: set[int] = set()
+    delims = _BLOCK_DELIMS.get(kind)
+    if not delims:
+        return covered
+    open_tok = close_tok = None
+    for n, line in enumerate(lines, start=1):
+        rest = line
+        while rest:
+            if open_tok is None:
+                nxt = min(
+                    ((rest.find(o), o, c) for o, c in delims if rest.find(o) != -1),
+                    default=None,
+                )
+                if nxt is None:
+                    break
+                i, open_tok, close_tok = nxt
+                rest = rest[i + len(open_tok):]
+                covered.add(n)
+            else:
+                covered.add(n)
+                j = rest.find(close_tok)
+                if j == -1:
+                    break
+                rest = rest[j + len(close_tok):]
+                open_tok = close_tok = None
+    return covered
 
 
 def parse_diff(diff: str):
@@ -221,11 +274,23 @@ def verify(repo: str, base: str, verbose: bool) -> list[str]:
     for f in parse_diff(diff):
         path = f["path"] or "(deleted file)"
         kind = kind_of(path)
+        # the middle lines of a multi-line marker start with ordinary words: read the file as it
+        # now stands and ask whether the line sits inside a block comment
+        inside: set[int] = set()
+        if kind in _BLOCK_DELIMS:
+            try:
+                inside = block_comment_lines(
+                    pathlib.Path(repo, path).read_text(encoding="utf-8", errors="replace").splitlines(), kind
+                )
+            except OSError:
+                inside = set()
         for h in f["hunks"]:
             for r in h["removed"]:
                 problems.append(f"{path}: removed line: {r[:120]}")
-            for a in h["added"]:
-                if kind in ("none", "skip") or not is_comment_line(kind, a):
+            for i, a in enumerate(h["added"]):
+                if kind in ("none", "skip") or (
+                    not is_comment_line(kind, a) and (h["new_start"] + i) not in inside
+                ):
                     problems.append(f"{path}:{h['new_start']}: added non-comment line: {a[:120]}")
                 # frappe.utils.jinja.safe_render refuses a template whose SOURCE contains ".__"
                 # (anti-SSTI), comments included: a marker quoting it took /raven down with a 417.

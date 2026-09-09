@@ -80,3 +80,73 @@ class TestCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVerifyUnderstandsRealComments(unittest.TestCase):
+    """verify() decides whether the marker pass wrote comments and nothing else.
+
+    Two things it used to get wrong, both of which kept the run red on every push and so kept the
+    `////` map from ever being written (neoffice-maintenance#205, 2026-09-09):
+    a `.sql` file was declared to have no comment syntax at all, and the middle lines of a
+    multi-line `/* … */` marker — which start with ordinary words — were called code.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.repo = self.dir
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, name, content, commit=True):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(content)
+        if commit:
+            self.git("add", name)
+            self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def test_sql_has_comment_syntax(self):
+        self.assertEqual(fork_markers.kind_of("frappe/database/mariadb/framework_mariadb.sql"), "sql")
+        self.assertTrue(fork_markers.is_comment_line("sql", "  -- //// Neoffice — the session's device."))
+        self.assertFalse(fork_markers.is_comment_line("sql", "  `device` varchar(255) DEFAULT 'desktop',"))
+
+    def test_a_marker_added_to_a_sql_file_is_comments_only(self):
+        base = self.write("schema.sql", "CREATE TABLE t (\n  a int\n);\n")
+        self.write("schema.sql", "CREATE TABLE t (\n  -- //// Neoffice — why this column exists.\n  a int\n);\n")
+        self.assertEqual(fork_markers.verify(self.repo, base, verbose=False), [])
+
+    def test_a_code_line_added_to_a_sql_file_is_still_refused(self):
+        base = self.write("schema.sql", "CREATE TABLE t (\n  a int\n);\n")
+        self.write("schema.sql", "CREATE TABLE t (\n  a int,\n  b int\n);\n")
+        self.assertTrue(fork_markers.verify(self.repo, base, verbose=False))
+
+    def test_the_middle_of_a_multiline_block_comment_is_a_comment(self):
+        base = self.write("theme.html", "<style>\n:root {\n  --x: 1;\n}\n</style>\n")
+        self.write(
+            "theme.html",
+            "<style>\n:root {\n"
+            "/* //// Neoffice — the dark chrome keeps the near-black of frappe,\n"
+            "   and only webshop's own pages take the light tokens — not every\n"
+            "   frappe page, login included */\n"
+            "  --x: 1;\n}\n</style>\n",
+        )
+        self.assertEqual(fork_markers.verify(self.repo, base, verbose=False), [])
+
+    def test_code_added_after_a_block_comment_is_still_refused(self):
+        base = self.write("theme.html", "<style>\n:root {\n  --x: 1;\n}\n</style>\n")
+        self.write(
+            "theme.html",
+            "<style>\n:root {\n"
+            "/* //// Neoffice — a reason\n   spread over two lines */\n"
+            "  --y: 2;\n  --x: 1;\n}\n</style>\n",
+        )
+        problems = fork_markers.verify(self.repo, base, verbose=False)
+        self.assertTrue(any("--y: 2" in p for p in problems), problems)
+
+    def test_block_comment_lines_stops_at_the_closing_delimiter(self):
+        lines = "/* a\n b */\ncode();\n/* c */\nmore();".splitlines()
+        self.assertEqual(fork_markers.block_comment_lines(lines, "slash"), {1, 2, 4})
