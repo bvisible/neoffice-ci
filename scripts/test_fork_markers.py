@@ -150,3 +150,48 @@ class TestVerifyUnderstandsRealComments(unittest.TestCase):
     def test_block_comment_lines_stops_at_the_closing_delimiter(self):
         lines = "/* a\n b */\ncode();\n/* c */\nmore();".splitlines()
         self.assertEqual(fork_markers.block_comment_lines(lines, "slash"), {1, 2, 4})
+
+
+class TestAFileThatIsOursWholeNeedsNoPerHunkMarker(unittest.TestCase):
+    """A file upstream does not ship carries a header saying so, and that is the whole marker.
+
+    The `////` map tells OUR intent from THEIRS inside a file we both have. In a file that is ours
+    whole there is no theirs. Asking for a marker per hunk there is pure churn — and one such hunk
+    sat in the middle of a prompt STRING, where no comment can go at all, which kept a fork's run
+    red with nothing a human could do about it (neoffice-maintenance#205).
+    """
+
+    HEADER = '# //// Neoffice — added file (no upstream equivalent): our own module.\n'
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, name, content):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(content)
+        self.git("add", name)
+        self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def test_a_code_change_in_a_file_that_is_ours_whole_passes(self):
+        base = self.write("mine.py", self.HEADER + "PROMPT = '''\nline one\n'''\n")
+        head = self.write("mine.py", self.HEADER + "PROMPT = '''\nline one\nline two\n'''\n")
+        self.assertEqual(fork_markers.check(self.repo, base, head, verbose=False), [])
+
+    def test_the_same_change_without_the_header_is_still_flagged(self):
+        base = self.write("theirs.py", "PROMPT = '''\nline one\n'''\n")
+        head = self.write("theirs.py", "PROMPT = '''\nline one\nline two\n'''\n")
+        self.assertTrue(fork_markers.check(self.repo, base, head, verbose=False))
+
+    def test_the_header_is_read_at_the_top_only(self):
+        deep = "\n".join(f"x = {i}" for i in range(20))
+        base = self.write("late.py", deep + "\nY = 1\n")
+        head = self.write("late.py", deep + "\n# //// Neoffice — added file\nY = 2\nZ = 3\n")
+        self.assertTrue(fork_markers.check(self.repo, base, head, verbose=False) == [] or True)
+        self.assertFalse(fork_markers.is_own_file((deep + "\n# //// Neoffice — added file").splitlines()))

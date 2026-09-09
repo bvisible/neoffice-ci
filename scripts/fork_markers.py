@@ -213,6 +213,23 @@ def docstring_lines(lines: list[str]) -> set[int]:
     return covered
 
 
+_OWN_FILE_RE = re.compile(r"////.*added file", re.IGNORECASE)
+OWN_FILE_HEAD = 12  # the convention puts the header at the very top
+
+
+def is_own_file(lines: list[str]) -> bool:
+    """True when the file declares itself as ours, with no upstream counterpart.
+
+    The convention (CLAUDE.md) asks for a header — `//// Neoffice — added file (no upstream
+    equivalent)` — on a file upstream does not ship. The `////` map exists to tell OUR intent from
+    THEIRS inside a file we both have; in a file that is ours whole there is no theirs, so a marker
+    per hunk says nothing and the pass rewrites the same file forever. One such hunk sat in the
+    middle of a prompt STRING, where no comment can go at all, and kept a fork's run red
+    (neoffice-maintenance#205, 2026-09-09).
+    """
+    return any(_OWN_FILE_RE.search(l) for l in lines[:OWN_FILE_HEAD])
+
+
 def marker_nearby(lines: list[str], new_start: int, new_count: int) -> bool:
     lo = max(0, new_start - 1 - LOOKBACK)
     hi = min(len(lines), new_start - 1 + max(new_count, 1) + (LOOKBACK if new_count == 0 else 0))
@@ -236,6 +253,8 @@ def check(repo: str, base: str, head: str, verbose: bool):
                 unmarked.append({"file": path, "kind": "not-commentable", "new_start": 0, "new_count": 0, "why": f"no comment syntax — needs an entry naming the path in {MANIFEST}", "snippet": []})
             continue
         lines = head_lines(head, path, repo)
+        if is_own_file(lines):
+            continue  # ours whole: the file header is the marker, per-hunk ones say nothing
         python = kind == "hash" and path.lower().endswith((".py", ".pyi"))
         doc_head = docstring_lines(lines) if python else set()
         doc_base = None  # the BASE file is only read when a hunk removes lines
