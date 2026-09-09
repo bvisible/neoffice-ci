@@ -244,8 +244,16 @@ jobs:
         # The apt wkhtmltopdf is the unpatched-Qt build: it ignores frappe's switches and aborts
         # on the first asset it cannot fetch ("HostNotFoundError"); the wkhtmltox release build is
         # what frappe/erpnext/hrms CIs install. Falls back to apt if the release is unreachable.
+        # The runner image ships Google Chrome's apt repository, and that repository serves
+        # index files that fail apt's hash check now and then ("Hash Sum mismatch",
+        # 2026-09-09, three runs in a row). One foreign repository must not take the whole
+        # `apt-get update` down — and with it mariadb-client, which is what every later step
+        # dies on ("mariadb: command not found", exit 127). Chrome is not needed from apt here:
+        # its source is dropped, and the update is retried once before giving up.
         run: |
-          sudo apt-get update -q && sudo apt-get install -yq mariadb-client xfonts-75dpi xfonts-base
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
+          sudo apt-get update -q || (sleep 15 && sudo apt-get update -q)
+          sudo apt-get install -yq mariadb-client xfonts-75dpi xfonts-base
           if wget -q -O /tmp/wkhtmltox.deb https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb; then
             sudo apt-get install -yq /tmp/wkhtmltox.deb || sudo apt-get install -yq wkhtmltopdf
           else
