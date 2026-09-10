@@ -78,6 +78,76 @@ class TestCheck(unittest.TestCase):
         self.assertIn("or []", found[0]["snippet"][0])
 
 
+class TestTemplateLiteralLines(unittest.TestCase):
+    """`////` inside a template literal is TEXT on screen, not a comment (#331)."""
+
+    def L(self, src):
+        return fork_markers.template_literal_lines(src.strip("\n").split("\n"))
+
+    def test_the_line_that_shipped_the_defect(self):
+        src = """
+value_html = `
+    <div class="form-hero-value">
+        <div class="form-hero-amount">${amount}</div>
+        //// Neoffice — add_hero_value_note registry: second, quiet line
+        ${this.hero_value_note_html()}
+    </div>`;
+"""
+        self.assertIn(5, self.L(src))
+
+    def test_a_comment_above_the_literal_is_left_alone(self):
+        src = """
+//// Neoffice — this one is a real comment
+value_html = `<div>${x}</div>`;
+"""
+        self.assertNotIn(1, self.L(src))
+
+    def test_code_inside_a_placeholder_is_code_again(self):
+        """A `//` inside ${ … } IS a comment: the scanner must come back out."""
+        src = """
+const a = `
+${(() => {
+    // an ordinary comment, inside the placeholder
+    return 1;
+})()}
+`;
+"""
+        self.assertNotIn(4, self.L(src))
+
+    def test_a_backtick_in_a_quoted_string_opens_nothing(self):
+        src = """
+const s = "a ` backtick in a string";
+//// Neoffice — still a comment
+"""
+        self.assertNotIn(2, self.L(src))
+
+    def test_a_backtick_in_a_line_comment_opens_nothing(self):
+        src = """
+// a ` in a comment
+//// Neoffice — still a comment
+"""
+        self.assertNotIn(2, self.L(src))
+
+    def test_an_escaped_backtick_does_not_close_the_literal(self):
+        src = """
+const a = `text \\` still inside
+//// Neoffice — displayed
+`;
+"""
+        self.assertIn(2, self.L(src))
+
+    def test_nested_literals(self):
+        src = """
+const a = `outer ${ `inner
+//// Neoffice — displayed, two levels down
+` } end`;
+"""
+        self.assertIn(2, self.L(src))
+
+    def test_a_file_with_no_literal_at_all(self):
+        self.assertEqual(self.L("const a = 1;\nconst b = 2;"), set())
+
+
 if __name__ == "__main__":
     unittest.main()
 

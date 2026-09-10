@@ -109,6 +109,90 @@ _BLOCK_DELIMS = {
 }
 
 
+def template_literal_lines(lines: list[str]) -> set[int]:
+    """1-based numbers of the lines that sit INSIDE a JS template literal.
+
+    There, `////` is not a comment: it is content, and it is rendered on screen. The
+    bot wrote two such lines into frappe's form hero, and every document with a key
+    value displayed the sentence under its amount (neoffice-maintenance#331). Nothing
+    catches it otherwise -- the file still parses, the tests still pass, and the diff
+    looks exactly like a comment.
+
+    A small scanner rather than a regex, because the states NEST and alternate: a
+    `${...}` inside a literal is code again (so a `//` in there IS a comment), that
+    code may open another literal (`${x ? `a` : `b`}` is everywhere), and a backtick
+    inside a quoted string or a comment opens nothing at all. The stack is what says
+    which of the two we are in, which a depth counter cannot.
+    """
+    inside: set[int] = set()
+    stack: list[tuple[str, int]] = []   # ("lit", 0) | ("sub", brace depth on entry)
+    quote = ""                          # ' or " while inside an ordinary string
+    block = False                       # inside /* */
+    braces = 0
+
+    def in_literal() -> bool:
+        return bool(stack) and stack[-1][0] == "lit"
+
+    for n, line in enumerate(lines, 1):
+        if in_literal() and not quote and not block:
+            inside.add(n)
+        i, L = 0, len(line)
+        while i < L:
+            c = line[i]
+            two = line[i : i + 2]
+            if block:
+                if two == "*/":
+                    block = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if quote:
+                if c == "\\":
+                    i += 2
+                    continue
+                if c == quote:
+                    quote = ""
+                i += 1
+                continue
+            if in_literal():
+                if c == "\\":
+                    i += 2
+                    continue
+                if two == "${":
+                    stack.append(("sub", braces))
+                    braces += 1
+                    i += 2
+                    continue
+                if c == "`":
+                    stack.pop()
+                i += 1
+                continue
+            # plain code -- either the top level or inside a ${ }
+            if two == "//":
+                break                    # the rest of the line is a comment
+            if two == "/*":
+                block = True
+                i += 2
+                continue
+            if c in "'\"":
+                quote = c
+                i += 1
+                continue
+            if c == "`":
+                stack.append(("lit", 0))
+                i += 1
+                continue
+            if c == "{":
+                braces += 1
+            elif c == "}":
+                braces -= 1
+                if stack and stack[-1][0] == "sub" and braces == stack[-1][1]:
+                    stack.pop()          # back inside the literal that opened it
+            i += 1
+    return inside
+
+
 def block_comment_lines(lines: list[str], kind: str) -> set[int]:
     """1-based numbers of the lines that sit INSIDE a block comment.
 
@@ -296,13 +380,18 @@ def verify(repo: str, base: str, verbose: bool) -> list[str]:
         # the middle lines of a multi-line marker start with ordinary words: read the file as it
         # now stands and ask whether the line sits inside a block comment
         inside: set[int] = set()
+        # `////` inside a JS template literal is not a comment, it is text on screen
+        # (neoffice-maintenance#331). is_comment_line() waves it through because the
+        # marker is in the line, so the literal has to be found separately.
+        in_literal: set[int] = set()
         if kind in _BLOCK_DELIMS:
             try:
-                inside = block_comment_lines(
-                    pathlib.Path(repo, path).read_text(encoding="utf-8", errors="replace").splitlines(), kind
-                )
+                src = pathlib.Path(repo, path).read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
-                inside = set()
+                src = []
+            inside = block_comment_lines(src, kind) if src else set()
+            if src and ext_of(path) in (".js", ".ts", ".jsx", ".tsx", ".vue", ".mjs", ".cjs"):
+                in_literal = template_literal_lines(src)
         for h in f["hunks"]:
             for r in h["removed"]:
                 problems.append(f"{path}: removed line: {r[:120]}")
@@ -315,6 +404,14 @@ def verify(repo: str, base: str, verbose: bool) -> list[str]:
                 # (anti-SSTI), comments included: a marker quoting it took /raven down with a 417.
                 elif path.lower().endswith((".html", ".htm", ".jinja", ".j2")) and ".__" in a:
                     problems.append(f"{path}:{h['new_start']}: '.__' in a template comment (safe_render would answer 417): {a[:120]}")
+                # A marker inside a template literal is rendered to the user: it took a
+                # sentence about a registry onto every document's hero (#331).
+                elif (h["new_start"] + i) in in_literal:
+                    problems.append(
+                        f"{path}:{h['new_start'] + i}: marker inside a template literal — it would be DISPLAYED, "
+                        f"not commented. Move it above the statement that opens the literal, or use <!-- --> "
+                        f"if the literal builds HTML: {a[:100]}"
+                    )
     for p in problems:
         print("NOT COMMENT-ONLY  " + p)
     print(f"verify: {'OK — comments only' if not problems else str(len(problems)) + ' problem(s)'}")
