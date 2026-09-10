@@ -144,6 +144,15 @@ const a = `outer ${ `inner
 """
         self.assertIn(2, self.L(src))
 
+    def test_an_html_comment_inside_a_literal_is_still_flagged_by_the_scanner(self):
+        """The scanner reports the LINE; verify() is what forgives `<!-- … -->`."""
+        src = """
+const html = `<div>
+    <!-- //// Neoffice — invisible in the DOM -->
+</div>`;
+"""
+        self.assertIn(2, self.L(src))
+
     def test_a_file_with_no_literal_at_all(self):
         self.assertEqual(self.L("const a = 1;\nconst b = 2;"), set())
 

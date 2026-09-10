@@ -109,6 +109,9 @@ _BLOCK_DELIMS = {
 }
 
 
+_HTML_COMMENT = re.compile(r"^\s*<!--.*-->\s*$")
+
+
 def template_literal_lines(lines: list[str]) -> set[int]:
     """1-based numbers of the lines that sit INSIDE a JS template literal.
 
@@ -406,7 +409,11 @@ def verify(repo: str, base: str, verbose: bool) -> list[str]:
                     problems.append(f"{path}:{h['new_start']}: '.__' in a template comment (safe_render would answer 417): {a[:120]}")
                 # A marker inside a template literal is rendered to the user: it took a
                 # sentence about a registry onto every document's hero (#331).
-                elif (h["new_start"] + i) in in_literal:
+                # The exception is an HTML comment: when the literal BUILDS HTML,
+                # `<!-- … -->` is a real comment in the DOM and nobody sees it. Refusing
+                # that too would leave no legal way to mark those hunks at all -- and a
+                # guard with no way out is a guard someone switches off.
+                elif (h["new_start"] + i) in in_literal and not _HTML_COMMENT.match(a):
                     problems.append(
                         f"{path}:{h['new_start'] + i}: marker inside a template literal — it would be DISPLAYED, "
                         f"not commented. Move it above the statement that opens the literal, or use <!-- --> "
