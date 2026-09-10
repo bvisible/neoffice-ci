@@ -10,6 +10,9 @@ without anyone opening a session.
 Design, on purpose:
 - Only ever fills entries whose msgstr is empty. A human translation is never
   overwritten, and a re-run is a no-op — safe to run on every push.
+- Never writes a translation identical to the source. Frappe merges every app's
+  catalogue into one flat dict, last app installed winning, so an identity does
+  not say nothing — it erases what another app translated, site-wide (#335).
 - Placeholders, format specifiers and HTML are preserved verbatim (the model is
   told, and we verify every returned string still carries them; a mismatch is
   dropped, never written).
@@ -122,6 +125,24 @@ def translate_batch(items: list[str], lang: str, model: str) -> dict[int, str]:
             print(f"  ~ dropped (token mismatch): {items[i]!r}", file=sys.stderr)
             continue
         if t.strip() == "":
+            continue
+        # An identity translation is a fleet-wide VETO, not a translation.
+        # `get_translations_from_apps` merges every installed app's catalogue in
+        # installation order, last one wins -- so a catalogue that answers
+        # "System Manager" for "System Manager" does not merely say nothing: it
+        # ERASES the real translation another app ships, on every screen of the
+        # site. Measured on the dev instance 2026-09-10: 1345 msgids where two
+        # installed apps disagree, 43 of them won by an identity, "System
+        # Manager" (disputed by 29 apps) among them -- so the whole fleet reads
+        # the English (neoffice-maintenance#335).
+        #
+        # An empty msgstr says the same thing (this app has no opinion) and costs
+        # nothing: the screen falls back to the source text either way, and
+        # another app's real translation is free to apply. So the model's answer
+        # is dropped rather than written, and the entry stays open for a later
+        # run that finds a better word.
+        if t.strip() == items[i].strip():
+            print(f"  ~ dropped (identity, would veto other apps): {items[i]!r}", file=sys.stderr)
             continue
         result[i] = t
     return result
