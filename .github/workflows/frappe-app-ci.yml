@@ -149,6 +149,48 @@ jobs:
             git ls-files | xargs -r python3 /tmp/check_client_names.py
           fi
 
+  # What the app would owe if the whole upstream rule set were enforced on it.
+  # REPORT ONLY, on purpose: only two repos have ever run these rules, each with its
+  # own debt, so a blocking job would go red on nearly every app on day one -- and a
+  # guard that is red everywhere is a guard someone switches off. It prints the count
+  # per rule so the debt can be paid rule by rule, and the day a count reaches zero
+  # that rule can move into the app's own pre-commit set. See neoffice-maintenance#329.
+  semgrep-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    name: semgrep report (${{ inputs.app }})
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rules and semgrep
+        run: |
+          python3 -m pip install --quiet semgrep
+          git clone --depth 1 -q https://github.com/bvisible/neoffice-ci /tmp/ci-rules
+
+      - name: What would this app owe?
+        run: |
+          set +e
+          semgrep --metrics=off --disable-version-check --quiet --json \
+                  --config /tmp/ci-rules/semgrep-rules/rules . > /tmp/sg.json
+          python3 - <<'PY'
+          import collections, json, os, pathlib
+          d = json.load(open("/tmp/sg.json"))
+          res = d.get("results", [])
+          c = collections.Counter(r["check_id"].split(".")[-1] for r in res)
+          sev = {r["check_id"].split(".")[-1]: r["extra"].get("severity", "?") for r in res}
+          lines = [f"**{len(res)} findings**, {len(c)} of 49 rules triggered", "",
+                   "| n | severity | rule |", "|---:|---|---|"]
+          lines += [f"| {n} | {sev[k]} | `{k}` |" for k, n in c.most_common()]
+          if not res:
+              lines = ["**No finding.** The whole upstream rule set is clean on this app —",
+                       "it can be enforced here, not only reported."]
+          out = "\n".join(lines)
+          print(out)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(f"## semgrep — what this app owes\n\n{out}\n")
+          PY
+
   # A nightly on an app nobody touched proves nothing and costs ~12 minutes of the
   # account's Actions allowance. This gate asks the hub what was last proven green
   # and skips the heavy job when the tree has not moved since. It asks the HUB and
