@@ -37,6 +37,14 @@ OURS = {"osiris", "neoservice", "demo", "prod", "www", "dev", "staging", "test"}
 # these resolve to nothing, they are not instances of the fleet.
 PLACEHOLDERS = {"your-site", "votre-site", "your-instance", "votre-instance", "example", "exemple"}
 
+# Hosts of ours that carry a suffix: `osiris-b2b.neoffice.me` is a second webshop
+# domain served by our dev box, named in an e2e readme because naming it is the
+# only way the readme is usable. Only these two prefixes take a suffix, and on
+# purpose: `osiris` and `neoservice` are machines of ours and can never be a
+# client's name, where `demo-<something>` or `test-<something>` very well could
+# be. Everything else stays an exact-label match, so an unknown host fails closed.
+INFRA_PREFIXES = {"osiris", "neoservice"}
+
 STRUCTURAL = [
     ("an instance id", re.compile(r"\bSRV-0\d{3}\b")),
     (
@@ -49,8 +57,9 @@ STRUCTURAL = [
         # stays caught, now because `demo-acme` is not allowlisted rather than because
         # the scan restarted mid-host.
         re.compile(
-            r"(?<![\w.-])(?!(?:%s)(?![a-z0-9-]))[a-z0-9][a-z0-9-]{1,40}\.neoffice\.me\b"
-            % "|".join(sorted(OURS | PLACEHOLDERS))
+            r"(?<![\w.-])(?!(?:%s)(?![a-z0-9-])|(?:%s)(?:-[a-z0-9-]+)?(?![a-z0-9]))"
+            r"[a-z0-9][a-z0-9-]{1,40}\.neoffice\.me\b"
+            % ("|".join(sorted(OURS | PLACEHOLDERS)), "|".join(sorted(INFRA_PREFIXES)))
         ),
     ),
 ]
