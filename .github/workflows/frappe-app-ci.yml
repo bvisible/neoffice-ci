@@ -149,6 +149,22 @@ jobs:
             git ls-files | xargs -r python3 /tmp/check_client_names.py
           fi
 
+  # An upstream preview is only worth its answer while it runs the SAME thing as
+  # the normal CI. See scripts/mirror_check.py for the two days this cost.
+  preview-mirrors-ci:
+    if: ${{ inputs.upstream_preview }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    name: preview mirrors the normal CI (${{ inputs.app }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Does the preview still run the same thing as tests.yml?
+        run: |
+          curl -sfL -o /tmp/mirror_check.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/mirror_check.py
+          python3 /tmp/mirror_check.py
+
   # What the app would owe if the whole upstream rule set were enforced on it.
   # REPORT ONLY, on purpose: only two repos have ever run these rules, each with its
   # own debt, so a blocking job would go red on nearly every app on day one -- and a
