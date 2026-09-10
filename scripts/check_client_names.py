@@ -30,11 +30,28 @@ import sys
 # Ours, not a client's: naming them is how a comment stays useful.
 OURS = {"osiris", "neoservice", "demo", "prod", "www", "dev", "staging", "test"}
 
+# Placeholders. A guard that refuses these leaves nothing to write in their
+# place: told to take a client's host out of a doc, the honest replacement IS a
+# host-shaped placeholder, and refusing it pushes the writer back to a real name
+# or to a shape the reader cannot recognise. Kept apart from OURS on purpose --
+# these resolve to nothing, they are not instances of the fleet.
+PLACEHOLDERS = {"your-site", "votre-site", "your-instance", "votre-instance", "example", "exemple"}
+
 STRUCTURAL = [
     ("an instance id", re.compile(r"\bSRV-0\d{3}\b")),
     (
         "a client subdomain",
-        re.compile(r"\b(?!(?:%s)\b)[a-z0-9][a-z0-9-]{1,40}\.neoffice\.me\b" % "|".join(sorted(OURS))),
+        # `\b` before the label cannot honour an allowlist entry that contains a
+        # hyphen: a hyphen is a word boundary too, so `votre-instance.neoffice.me`
+        # simply restarted a match at `instance` and was reported anyway. The
+        # lookbehind pins the match to the LEFTMOST label, and `(?![a-z0-9-])` makes
+        # the allowlist compare against that whole label -- so `demo-acme.neoffice.me`
+        # stays caught, now because `demo-acme` is not allowlisted rather than because
+        # the scan restarted mid-host.
+        re.compile(
+            r"(?<![\w.-])(?!(?:%s)(?![a-z0-9-]))[a-z0-9][a-z0-9-]{1,40}\.neoffice\.me\b"
+            % "|".join(sorted(OURS | PLACEHOLDERS))
+        ),
     ),
 ]
 
