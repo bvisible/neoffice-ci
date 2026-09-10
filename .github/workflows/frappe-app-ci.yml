@@ -114,6 +114,12 @@ jobs:
   # inside a PUBLIC repo would itself be the leak. Without it the structural half
   # still runs, and the log says so.
   client-names:
+    # PUBLIC repos only. The private ones -- neoffice-theme, nora, erpnextswiss,
+    # the tracker itself -- name clients on purpose: that is what a private repo
+    # is for, and a guard that fought it there would be turned off everywhere.
+    # Measured the hard way on 2026-09-10: the first run of this job failed on
+    # neoffice_theme, which is private and legitimately full of client names.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     name: no client names (${{ inputs.app }})
