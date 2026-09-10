@@ -52,6 +52,13 @@ SKIP_FILES = ("yarn.lock", "package-lock.json", "pnpm-lock.yaml", "poetry.lock",
 # Built SPA output committed by the build bots (commit-the-build forks): vite hashes its chunks,
 # workbox ships its runtime, and none of it is source anyone marks.
 _BUILT_ASSET = re.compile(r"(/public/[^/]+/assets/|/public/[^/]+/(index|sw|workbox)[-.][^/]*\.(js|css)$|-[A-Za-z0-9_]{8}\.(js|css)(\.map)?$|/workbox-[^/]+\.js$)")
+# A vendored bundle is a build output someone committed, not source anyone edits:
+# `public/js/lib/` is where frappe keeps third-party libraries, and a `*.global.js`
+# is a tsup IIFE build (that is how the NeoCockpit React library reaches the desk).
+# They are minified onto a handful of enormous lines, so there is no line to write a
+# marker on — and the check stayed red on every push for five hunks nobody could
+# ever mark. A verifier that cannot be satisfied is a verifier people stop reading.
+_VENDORED_BUNDLE = re.compile(r"(/public/js/lib/|\.global\.js$)")
 
 
 def sh(*args: str, cwd: str | None = None) -> str:
@@ -69,7 +76,12 @@ def ext_of(path: str) -> str:
 def kind_of(path: str) -> str:
     """'hash' | 'slash' | 'markup' | 'none' | 'skip'"""
     low = "/" + path.lower()
-    if any(d in low for d in SKIP_DIRS) or os.path.basename(path) in SKIP_FILES or _BUILT_ASSET.search("/" + path):
+    if (
+        any(d in low for d in SKIP_DIRS)
+        or os.path.basename(path) in SKIP_FILES
+        or _BUILT_ASSET.search("/" + path)
+        or _VENDORED_BUNDLE.search("/" + path)
+    ):
         return "skip"
     e = ext_of(path)
     if e in NOT_COMMENTABLE or e in (".bundle.js", ".bundle.css"):

@@ -188,6 +188,22 @@ class TestVerifyUnderstandsRealComments(unittest.TestCase):
             self.git("commit", "-q", "-m", "step")
         return self.git("rev-parse", "HEAD")
 
+    def test_a_vendored_bundle_is_not_something_to_mark(self):
+        """`public/js/lib/` holds vendored libraries; `*.global.js` is a tsup build.
+
+        Minified onto a handful of enormous lines, so there is no line to write a
+        marker on. Five such hunks kept the check red on every push of the frappe
+        fork -- and a verifier that cannot be satisfied is one people stop reading.
+        """
+        self.assertEqual(fork_markers.kind_of("frappe/public/js/lib/neocockpit.global.js"), "skip")
+        self.assertEqual(fork_markers.kind_of("frappe/public/js/lib/jquery/jquery.js"), "skip")
+
+    def test_our_own_sources_are_still_marked(self):
+        """The exception is about build output, not about `public/js` at large."""
+        self.assertEqual(fork_markers.kind_of("neoffice_theme/public/js/neoffice-theme.js"), "slash")
+        self.assertEqual(fork_markers.kind_of("frappe/public/js/frappe/form/form.js"), "slash")
+        self.assertEqual(fork_markers.kind_of("frappe/commands/utils.py"), "hash")
+
     def test_sql_has_comment_syntax(self):
         self.assertEqual(fork_markers.kind_of("frappe/database/mariadb/framework_mariadb.sql"), "sql")
         self.assertTrue(fork_markers.is_comment_line("sql", "  -- //// Neoffice — the session's device."))
