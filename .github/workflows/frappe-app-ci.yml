@@ -95,9 +95,54 @@ on:
         required: true
       FLEET_READ_TOKEN:
         description: "Read token for the PRIVATE bvisible dependency repos (neoffice_theme, erpnextswiss, nora…): a runner has no rights on another private repo. Callers pass `secrets: inherit`."
+      CLIENT_NAME_PATTERNS:
+        required: false
+        description: "One regex per line, the client names a public repo must never carry. Declared here because a list of client names inside this PUBLIC repository would itself be the leak: it lives in a secret, and without it only the structural half runs (instance ids, client subdomains). Callers pass `secrets: inherit`."
         required: false
 
 jobs:
+  # A public repository is read, indexed and forked by anyone, and a client name in
+  # it is a leak that no later edit takes back out of the history. A sweep on
+  # 2026-09-10 found 34 such lines across 8 public repos -- payment incidents with
+  # amounts and dates, a test asserting on a client's company name, two verbatim
+  # quotes from a client conversation -- and two of them had been written that very
+  # morning, after a cleanup pass. A rule in a CLAUDE.md does not check itself.
+  #
+  # Cheap (no bench, no services) and it runs on every event, including the ones the
+  # gate below skips: the point is to catch the line before it is indexed.
+  # The name half needs the CLIENT_NAME_PATTERNS secret -- a list of client names
+  # inside a PUBLIC repo would itself be the leak. Without it the structural half
+  # still runs, and the log says so.
+  client-names:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    name: no client names (${{ inputs.app }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the guard
+        run: |
+          curl -sfL -o /tmp/check_client_names.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_client_names.py
+
+      - name: Does this change name a client?
+        env:
+          CLIENT_NAME_PATTERNS: ${{ secrets.CLIENT_NAME_PATTERNS }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # A push carries what came before it; anything else (a PR, a schedule, the
+          # first push of a branch) is checked whole rather than skipped -- a guard
+          # that cannot work out a range must not decide there is nothing to see.
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            export DIFF_BASE="$BEFORE"
+            python3 /tmp/check_client_names.py
+          else
+            git ls-files | xargs -r python3 /tmp/check_client_names.py
+          fi
+
   # A nightly on an app nobody touched proves nothing and costs ~12 minutes of the
   # account's Actions allowance. This gate asks the hub what was last proven green
   # and skips the heavy job when the tree has not moved since. It asks the HUB and
