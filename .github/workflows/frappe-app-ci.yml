@@ -95,8 +95,8 @@ on:
         required: true
       FLEET_READ_TOKEN:
         description: "Read token for the PRIVATE bvisible dependency repos (neoffice_theme, erpnextswiss, nora…): a runner has no rights on another private repo. Callers pass `secrets: inherit`."
-      CLIENT_NAME_PATTERNS:
         required: false
+      CLIENT_NAME_PATTERNS:
         description: "One regex per line, the client names a public repo must never carry. Declared here because a list of client names inside this PUBLIC repository would itself be the leak: it lives in a secret, and without it only the structural half runs (instance ids, client subdomains). Callers pass `secrets: inherit`."
         required: false
 
