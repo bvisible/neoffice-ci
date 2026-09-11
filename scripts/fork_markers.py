@@ -16,16 +16,21 @@ workflow of bvisible/neoffice-ci.
 
 A hunk counts as marked when one of its added lines carries `////`, or when the new file
 has a `////` line within LOOKBACK lines above the hunk (a marker placed just before the
-change). A hunk made only of comment lines is a marker itself, never flagged — and in a
-Python file a docstring counts as a comment: it cannot carry a `#` marker, and the lines
-above it are more docstring, so no placement could ever satisfy the check
-(neoffice-maintenance#293). Files that cannot carry comments (JSON, PO/MO, images,
-lockfiles, built assets) are flagged unless NEOFFICE_FORK_MARKERS.md at HEAD names their
-path.
+change). In a tag-based template (HTML, Vue, Jinja...), a change to the attributes of a
+multi-line opening tag counts as marked when the marker sits within LOOKBACK lines above
+that tag's `<` line: no comment can go between attributes, so the element is where the
+marker lives (neoffice-maintenance#354). A hunk made only of comment lines is a marker
+itself, never flagged — and in a Python file a docstring counts as a comment: it cannot
+carry a `#` marker, and the lines above it are more docstring, so no placement could ever
+satisfy the check (neoffice-maintenance#293). Files that cannot carry comments (JSON,
+PO/MO, images, lockfiles, built assets) are flagged unless NEOFFICE_FORK_MARKERS.md at HEAD
+names their path. A committed build artifact is skipped when the manifest names it (full
+path or glob) in the first column of a table headed `| Artifact |`.
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import io
 import json
 import os
@@ -335,6 +340,62 @@ def marker_nearby(lines: list[str], new_start: int, new_count: int) -> bool:
     return any(MARK in l for l in lines[lo:hi])
 
 
+# Tag-based templates, where an opening tag may span lines and nothing — neither an HTML nor a
+# template comment — can sit between its attributes. JSX is not here: it accepts `{/* */}`.
+TAGGED = {".html", ".htm", ".vue", ".xml", ".svg", ".jinja", ".j2", ".hbs", ".mustache"}
+_TAG_OPEN = re.compile(r"^\s*<[A-Za-z][\w.:-]*")
+TAG_SCAN = 40  # how far above an attribute the `<tag` line that opens it may sit
+
+
+def enclosing_tag_line(lines: list[str], line_no: int) -> int | None:
+    """1-based line of the `<tag` whose multi-line opening tag holds line `line_no`, or None.
+
+    The marker for an attribute change can only go on the element, above its `<tag` line, and
+    LOOKBACK counts from the hunk: a tag with ten attributes put that marker out of reach.
+    Thirteen hunks of the wiki fork carried exactly that marker and were still reported, while
+    the manifest promised the case was covered (neoffice-maintenance#354). Scanning up stops at
+    the first line that closes a tag (`>`, but not an arrow `=>`): the line is then in content,
+    not inside an opening tag, and the ordinary rule applies.
+    """
+    for n in range(min(line_no, len(lines)), max(0, line_no - TAG_SCAN), -1):
+        text = lines[n - 1].rstrip()
+        closes = text.endswith(">") and not text.endswith("=>")
+        if _TAG_OPEN.match(text):
+            return None if closes else n
+        if closes:
+            return None
+    return None
+
+
+def manifest_artifacts(manifest: list[str]) -> list[str]:
+    """Path patterns named in the first column of a manifest table headed `| Artifact |`.
+
+    A commit-the-build fork keeps compiled output in git (wiki's tailwind.css, helpdesk's
+    public/desk/**). A marker written INTO an artifact is wiped by the next build and the check
+    goes red again, on a file nobody may hand-edit — so the decision is marked at its source
+    (the `.gitignore` that un-ignores the output, the generator) and the manifest names the
+    artifacts in a table. That table is what this reads. Only entries holding a `/` count: a
+    bare `*.css` would excuse every stylesheet of the fork.
+    """
+    patterns: list[str] = []
+    in_table = False
+    for line in manifest:
+        row = line.strip()
+        if not row.startswith("|"):
+            in_table = False
+            continue
+        first = row.strip("|").split("|")[0].strip()
+        if not in_table:
+            in_table = first.lower().startswith("artifact")
+            continue
+        patterns += [p for p in re.findall(r"`([^`\s]+)`", first) if "/" in p]
+    return patterns
+
+
+def is_listed_artifact(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path, p) for p in patterns)
+
+
 def same_as_upstream(repo: str, upstream_base: str, head: str, path: str) -> bool:
     """True when `path` at `head` is byte-identical to the same path at `upstream_base`.
 
@@ -348,13 +409,14 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
     diff = sh("git", "diff", "--unified=0", "--no-color", "--no-ext-diff", base, head, "--", ".", cwd=repo)
     manifest = head_lines(head, MANIFEST, repo)
     manifest_text = "\n".join(manifest)
+    artifacts = manifest_artifacts(manifest)
     unmarked = []
     for f in parse_diff(diff):
         path = f["path"]
         if path is None:  # deleted file
             continue
         kind = kind_of(path)
-        if kind == "skip":
+        if kind == "skip" or is_listed_artifact(path, artifacts):
             continue
         # A file byte-identical to the upstream it is based on carries no divergence, so there is
         # nothing for a marker to explain, whatever the range changed in it. Without this, taking a
@@ -371,6 +433,7 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
         if is_own_file(lines):
             continue  # ours whole: the file header is the marker, per-hunk ones say nothing
         python = kind == "hash" and path.lower().endswith((".py", ".pyi"))
+        tagged = ext_of(path) in TAGGED
         doc_head = docstring_lines(lines) if python else set()
         doc_base = None  # the BASE file is only read when a hunk removes lines
         for h in f["hunks"]:
@@ -386,6 +449,11 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
                 continue
             if marker_nearby(lines, h["new_start"], h["new_count"]):
                 continue
+            if tagged:
+                # from the line above the change; for a pure removal, git names the line it follows
+                tag = enclosing_tag_line(lines, h["new_start"] - 1 if h["new_count"] else h["new_start"])
+                if tag and marker_nearby(lines, tag, 1):
+                    continue
             unmarked.append({
                 "file": path, "kind": "removed-only" if not added else "modified" if removed else "added",
                 "new_start": h["new_start"], "new_count": h["new_count"], "old_count": h["old_count"],

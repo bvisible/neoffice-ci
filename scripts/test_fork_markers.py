@@ -157,10 +157,6 @@ const html = `<div>
         self.assertEqual(self.L("const a = 1;\nconst b = 2;"), set())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestVerifyUnderstandsRealComments(unittest.TestCase):
     """verify() decides whether the marker pass wrote comments and nothing else.
 
@@ -290,3 +286,135 @@ class TestAFileThatIsOursWholeNeedsNoPerHunkMarker(unittest.TestCase):
         head = self.write("late.py", deep + "\n# //// Neoffice — added file\nY = 2\nZ = 3\n")
         self.assertTrue(fork_markers.check(self.repo, base, head, verbose=False) == [] or True)
         self.assertFalse(fork_markers.is_own_file((deep + "\n# //// Neoffice — added file").splitlines()))
+
+
+class TestAMarkerOnTheElementCoversItsAttributes(unittest.TestCase):
+    """Nothing can sit between the attributes of an opening tag: their marker goes on the element.
+
+    LOOKBACK counts from the hunk, so on a tag with ten attributes the element's marker was out of
+    reach — thirteen wiki hunks that carried one were reported anyway (neoffice-maintenance#354).
+    """
+
+    BASE = (
+        "<template>\n"
+        '    <div class="frame">\n'
+        "        <img\n"
+        '            :src="src"\n'
+        '            :alt="alt"\n'
+        '            :title="title"\n'
+        '            :width="width"\n'
+        '            class="image"\n'
+        '            @keydown="() =>\n'
+        '                select()"\n'
+        '            @click="select"\n'
+        "        />\n"
+        "    </div>\n"
+        "</template>\n"
+    )
+    MARKER = (
+        "        <!-- //// Neoffice — the width goes through :style, and a click opens the\n"
+        "             //// lightbox in read mode; no comment can sit between the attributes. -->\n"
+    )
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, name, content):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(content)
+        self.git("add", name)
+        self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def head(self, marker):
+        return (
+            self.BASE.replace("        <img\n", (self.MARKER if marker else "") + "        <img\n")
+            .replace('            :width="width"\n', "")
+            .replace('            @click="select"\n', '            :style="imageStyle"\n            @click="open"\n')
+        )
+
+    def test_a_marker_on_the_element_covers_its_attributes(self):
+        """Both hunks sit below an arrow `=>`, which must not read as the end of the tag."""
+        base = self.write("Image.vue", self.BASE)
+        head = self.write("Image.vue", self.head(marker=True))
+        self.assertEqual(fork_markers.check(self.repo, base, head, verbose=False), [])
+
+    def test_without_it_both_attribute_hunks_are_flagged(self):
+        base = self.write("Image.vue", self.BASE)
+        head = self.write("Image.vue", self.head(marker=False))
+        found = fork_markers.check(self.repo, base, head, verbose=False)
+        self.assertEqual(sorted(u["kind"] for u in found), ["modified", "removed-only"])
+
+    def test_a_change_in_content_is_not_an_attribute(self):
+        """Scanning up meets a tag that closes: the change is text, and LOOKBACK decides alone."""
+        base = self.write("page.html", '<div>\n    <p class="lead">\n        one\n        two\n        three\n        four\n    </p>\n</div>\n')
+        head = self.write("page.html", '<div>\n    <!-- //// Neoffice — a reason -->\n    <p class="lead">\n        one\n        two\n        three\n        FOUR\n    </p>\n</div>\n')
+        self.assertEqual(len(fork_markers.check(self.repo, base, head, verbose=False)), 1)
+
+    def test_the_scan_is_bounded(self):
+        lines = ["<img"] + ['    a="1"'] * (fork_markers.TAG_SCAN + 5)
+        self.assertIsNone(fork_markers.enclosing_tag_line(lines, len(lines)))
+        self.assertEqual(fork_markers.enclosing_tag_line(lines[:10], 10), 1)
+        self.assertIsNone(fork_markers.enclosing_tag_line(lines, 0))
+
+
+class TestAListedArtifactIsBuildOutput(unittest.TestCase):
+    """A committed build artifact is named in the manifest, never marked (neoffice-maintenance#354).
+
+    A marker written into generated output is wiped by the next build, and the run goes red again
+    on a file nobody may hand-edit.
+    """
+
+    MANIFEST = (
+        "# manifest\n\n"
+        "| Artifact | Built from |\n"
+        "| --- | --- |\n"
+        "| `pub/css/app.css` | `src/app.css` via the build |\n"
+        "| `pub/desk/**` (chunks, `sw.js`) | `desk/**` |\n"
+        "\n"
+        "| Hunk | Change |\n"
+        "| --- | --- |\n"
+        "| `pub/css/hand.css` — a rule | named, but not in an artifact table |\n"
+    )
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write_all(self, files):
+        for name, content in files.items():
+            path = os.path.join(self.repo, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(content)
+            self.git("add", name)
+        self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def test_listed_artifacts_are_skipped_and_the_rest_is_not(self):
+        files = {"pub/css/app.css": "a { color: red; }\n", "pub/desk/index.html": "<div>one</div>\n", "pub/css/hand.css": "b { color: red; }\n"}
+        base = self.write_all({fork_markers.MANIFEST: self.MANIFEST, **files})
+        head = self.write_all({k: v.replace("red", "blue").replace("one", "two") for k, v in files.items()})
+        found = fork_markers.check(self.repo, base, head, verbose=False)
+        self.assertEqual([u["file"] for u in found], ["pub/css/hand.css"])
+
+    def test_patterns_come_from_the_first_column_of_an_artifact_table_only(self):
+        self.assertEqual(fork_markers.manifest_artifacts(self.MANIFEST.splitlines()), ["pub/css/app.css", "pub/desk/**"])
+
+    def test_a_bare_pattern_excuses_nothing(self):
+        self.assertEqual(fork_markers.manifest_artifacts(["| Artifact | x |", "| --- | --- |", "| `*.css` | y |"]), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
