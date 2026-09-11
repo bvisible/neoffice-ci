@@ -6,7 +6,7 @@ why (CLAUDE.md, rule "mark every change to code that is not ours"). This script 
 mechanical half of that rule; the AI half (writing the reasons) runs in the fork-markers
 workflow of bvisible/neoffice-ci.
 
-  fork_markers.py check  --base SHA --head SHA [--json report.json] [--verbose]
+  fork_markers.py check  --base SHA --head SHA [--upstream-base SHA] [--json report.json] [--verbose]
       List the hunks of BASE..HEAD that add or remove non-comment lines without a `////`
       marker nearby. Exit 1 when there is at least one.
   fork_markers.py verify --base SHA [--verbose]
@@ -335,7 +335,16 @@ def marker_nearby(lines: list[str], new_start: int, new_count: int) -> bool:
     return any(MARK in l for l in lines[lo:hi])
 
 
-def check(repo: str, base: str, head: str, verbose: bool):
+def same_as_upstream(repo: str, upstream_base: str, head: str, path: str) -> bool:
+    """True when `path` at `head` is byte-identical to the same path at `upstream_base`.
+
+    Any error (unknown revision, path absent upstream) answers False, so the hunk stays checked.
+    """
+    r = subprocess.run(["git", "diff", "--quiet", upstream_base, head, "--", path], cwd=repo, capture_output=True)
+    return r.returncode == 0
+
+
+def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | None = None):
     diff = sh("git", "diff", "--unified=0", "--no-color", "--no-ext-diff", base, head, "--", ".", cwd=repo)
     manifest = head_lines(head, MANIFEST, repo)
     manifest_text = "\n".join(manifest)
@@ -346,6 +355,13 @@ def check(repo: str, base: str, head: str, verbose: bool):
             continue
         kind = kind_of(path)
         if kind == "skip":
+            continue
+        # A file byte-identical to the upstream it is based on carries no divergence, so there is
+        # nothing for a marker to explain, whatever the range changed in it. Without this, taking a
+        # regenerated file back to upstream's exact bytes read as an unexplained change, and the
+        # marking pass wrote a marker that CREATED the divergence it claimed to document (crm,
+        # frontend/auto-imports.d.ts, 2026-09-11).
+        if upstream_base and same_as_upstream(repo, upstream_base, head, path):
             continue
         if kind == "none" or f["binary"]:
             if path not in manifest_text:
@@ -441,10 +457,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check"); c.add_argument("--base", required=True); c.add_argument("--head", default="HEAD"); c.add_argument("--json"); c.add_argument("--repo", default="."); c.add_argument("--verbose", action="store_true")
+    c.add_argument("--upstream-base", help="upstream commit the fork is based on: files identical to it need no marker")
     v = sub.add_parser("verify"); v.add_argument("--base", required=True); v.add_argument("--repo", default="."); v.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     if a.cmd == "check":
-        unmarked = check(a.repo, a.base, a.head, a.verbose)
+        unmarked = check(a.repo, a.base, a.head, a.verbose, a.upstream_base)
         if a.json:
             json.dump({"base": a.base, "head": a.head, "unmarked": unmarked}, open(a.json, "w"), indent=1)
         return 1 if unmarked else 0

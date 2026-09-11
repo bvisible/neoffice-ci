@@ -61,6 +61,8 @@ jobs:
 
       - name: Resolve the range
         id: range
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           BASE="${{ inputs.base }}"; HEAD="${{ inputs.head }}"
           [ -n "$HEAD" ] || HEAD="${{ github.sha }}"
@@ -76,6 +78,33 @@ jobs:
             echo "anchor: last clean state ${ANCHOR:0:10} (refs/fork-markers/clean)"
             BASE="$ANCHOR"
           fi
+          # An upstream merge in the range brings the upstream's own history with it: hunks that are
+          # not ours and carry no marker by design. Measured from our side, the crm v1.83.0 merge
+          # counted 4079 of them and went red, and a smaller merge, under max_hunks, would have gone to
+          # the marking pass, which then writes //// on upstream code. When a merge in the range has
+          # its second parent in the fork's parent repository, measure from that parent: what is left
+          # is exactly what we carry on top of the upstream just merged (1 hunk on that crm merge, a
+          # real one). A merge of one of OUR branches (second parent absent from the parent
+          # repository) is left alone and stays fully checked. An explicit base input is never
+          # overridden: it is a human's choice.
+          PARENT=$(gh api "repos/${{ github.repository }}" --jq '.parent.clone_url // empty' 2>/dev/null || true)
+          echo "parent=$PARENT" >> "$GITHUB_OUTPUT"
+          FETCHED=""
+          if [ -z "${{ inputs.base }}" ] && [ -n "$PARENT" ]; then
+            for M in $(git rev-list --merges --first-parent "$BASE..$HEAD"); do
+              P2=$(git rev-parse "$M^2")
+              if git merge-base --is-ancestor "$P2" "$BASE" 2>/dev/null; then continue; fi
+              if [ -z "$FETCHED" ]; then
+                git fetch -q --no-tags "$PARENT" '+refs/heads/*:refs/remotes/parent/*' || break
+                FETCHED=1
+              fi
+              if [ -n "$(git for-each-ref --contains "$P2" --count=1 refs/remotes/parent)" ]; then
+                echo "upstream merge ${M:0:10}: measuring from its upstream side ${P2:0:10} ($PARENT)"
+                BASE="$P2"
+                break
+              fi
+            done
+          fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"; echo "head=$HEAD" >> "$GITHUB_OUTPUT"
           echo "range: $BASE..$HEAD"
 
@@ -85,6 +114,25 @@ jobs:
           set +e
           python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "${{ steps.range.outputs.head }}" --json /tmp/fm/report.json | tee /tmp/fm/check.txt
           N=$(python3 -c "import json;print(len(json.load(open('/tmp/fm/report.json'))['unmarked']))")
+          # A file brought back to the upstream's exact bytes carries no divergence. Telling it apart
+          # needs the upstream, fetched only when there is something to excuse. The upstream base is
+          # the merge-base with the parent branch that leaves the fewest commits of ours on top.
+          UB=""
+          PARENT="${{ steps.range.outputs.parent }}"
+          if [ "$N" != "0" ] && [ -n "$PARENT" ] && git fetch -q --no-tags "$PARENT" '+refs/heads/*:refs/remotes/parent/*'; then
+            BEST=""
+            for R in $(git for-each-ref --format='%(refname)' refs/remotes/parent); do
+              MB=$(git merge-base "${{ steps.range.outputs.head }}" "$R" 2>/dev/null) || continue
+              C=$(git rev-list --count "$MB..${{ steps.range.outputs.head }}")
+              if [ -z "$BEST" ] || [ "$C" -lt "$BEST" ]; then UB="$MB"; BEST="$C"; fi
+            done
+            if [ -n "$UB" ]; then
+              echo "upstream base ${UB:0:10} ($BEST commits of ours on top): files identical to it need no marker"
+              python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "${{ steps.range.outputs.head }}" --upstream-base "$UB" --json /tmp/fm/report.json | tee /tmp/fm/check.txt
+              N=$(python3 -c "import json;print(len(json.load(open('/tmp/fm/report.json'))['unmarked']))")
+            fi
+          fi
+          echo "upstream_base=$UB" >> "$GITHUB_OUTPUT"
           echo "check exit: ${PIPESTATUS[0]} — $N unmarked"
           echo "unmarked=$N" >> "$GITHUB_OUTPUT"
           HAS=false; [ -n "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" ] && HAS=true
@@ -192,7 +240,7 @@ jobs:
         if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
         run: |
           set +e
-          python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "$(git rev-parse HEAD)" | tee /tmp/fm/recheck.txt
+          python3 /tmp/fm/fork_markers.py check --base "${{ steps.range.outputs.base }}" --head "$(git rev-parse HEAD)" ${{ steps.check.outputs.upstream_base && format('--upstream-base {0}', steps.check.outputs.upstream_base) || '' }} | tee /tmp/fm/recheck.txt
           RC=${PIPESTATUS[0]}
           { echo; echo "### After the marker pass"; echo; echo '```'; cat /tmp/fm/recheck.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ $RC -eq 0 ] || { echo "::error::hunks still unmarked after the pass — a human must mark them"; exit 1; }
