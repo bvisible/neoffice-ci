@@ -688,7 +688,18 @@ jobs:
         # tests (a --debug-records job exits 0 even when the walk fails) — one
         # actually closed the erpnextswiss [CI] issue as "proof".
         if: (success() || failure()) && !startsWith(inputs.test_args, '--debug-records')
+        env:
+          CI_SECRET: ${{ secrets.CI_REPORT_SECRET }}
         run: |
+          # The hub's answer is read, not discarded: a caller without
+          # CI_REPORT_SECRET got 403 {"ok": false} inside a green step, and its
+          # red runs reached no tracker issue (the frappe fork, until
+          # 2026-09-12). A report that does not land now leaves a warning on the
+          # run; it never turns it red.
+          if [ -z "$CI_SECRET" ]; then
+            echo "::warning title=CI report not sent::no CI_REPORT_SECRET on this repository (secrets: inherit in the caller?): this run opens and closes no tracker issue"
+            exit 0
+          fi
           SUMMARY=""
           if [ "${{ job.status }}" != "success" ]; then
             if [ -f /tmp/test-output.log ]; then
@@ -697,9 +708,9 @@ jobs:
               SUMMARY="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
             fi
           fi
-          curl -sS --max-time 20 -X POST \
+          resp=$(curl -sS --max-time 20 -X POST \
             "https://neoservice.neoffice.me/api/method/neoffice_devops.github.ci.report" \
-            --data-urlencode "secret=${{ secrets.CI_REPORT_SECRET }}" \
+            --data-urlencode "secret=$CI_SECRET" \
             --data-urlencode "repo=${{ github.repository }}" \
             --data-urlencode "app=${{ inputs.app }}" \
             --data-urlencode "sha=${{ github.sha }}" \
@@ -707,4 +718,9 @@ jobs:
             --data-urlencode "conclusion=${{ job.status }}" \
             --data-urlencode "ref=${{ github.ref_name }}" \
             --data-urlencode "upstream=${{ inputs.upstream_preview }}" \
-            --data-urlencode "summary=${SUMMARY}" || true
+            --data-urlencode "summary=${SUMMARY}" 2>&1) || true
+          echo "$resp"
+          if ! printf '%s' "$resp" | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("message", {}).get("ok") else 1)' 2>/dev/null; then
+            short=$(printf '%s' "$resp" | tr -d '\r\n' | cut -c1-200)
+            echo "::warning title=CI report refused::the hub did not accept this run's report (${short:-no answer}): no tracker issue was opened or closed"
+          fi
