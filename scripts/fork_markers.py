@@ -128,6 +128,60 @@ _BLOCK_DELIMS = {
 
 _HTML_COMMENT = re.compile(r"^\s*<!--.*-->\s*$")
 
+# After these characters and words, a `/` in JavaScript opens a regular expression
+# rather than a division (the usual lexer heuristic). A regex must also close on its
+# own line, so a wrong guess never reaches past that line.
+_REGEX_AFTER_CHARS = set("(,=:[!&|?{};+-*%<>~^")
+_REGEX_AFTER_WORDS = {"return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "else", "do", "yield", "await"}
+
+
+def _regex_may_start(line: str, i: int) -> bool:
+    """Whether the `/` at line[i] opens a regex literal. Looks back past spaces only:
+    reading the whole line up to every `/` made a long line quadratic (11 s for twenty
+    32 000-character lines of divisions, minutes for a minified bundle)."""
+    j = i - 1
+    while j >= 0 and line[j] in " \t":
+        j -= 1
+    if j < 0:
+        return True
+    c = line[j]
+    if c in "+-" and j > 0 and line[j - 1] == c:
+        return False                 # `a++ / 2` divides
+    if c in _REGEX_AFTER_CHARS:
+        return True
+    k = j
+    while k >= 0 and (line[k].isalnum() or line[k] in "_$"):
+        k -= 1
+    return line[k + 1 : j + 1] in _REGEX_AFTER_WORDS
+
+
+_REGEX_MAX_LENGTH = 300              # a longer "regex" is read as a division
+
+
+def _regex_end(line: str, start: int):
+    """Index just past the regex literal opened at `start`, flags included, or None
+    when nothing closes it within _REGEX_MAX_LENGTH characters on this line: the `/`
+    was not a regex after all."""
+    i, in_class = start + 1, False
+    stop = min(len(line), start + _REGEX_MAX_LENGTH)
+    while i < stop:
+        c = line[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+        elif c == "[":
+            in_class = True
+        elif c == "/":
+            i += 1
+            while i < len(line) and line[i].isalpha():
+                i += 1
+            return i
+        i += 1
+    return None
+
 
 def template_literal_lines(lines: list[str]) -> set[int]:
     """1-based numbers of the lines that sit INSIDE a JS template literal.
@@ -143,6 +197,13 @@ def template_literal_lines(lines: list[str]) -> set[int]:
     code may open another literal (`${x ? `a` : `b`}` is everywhere), and a backtick
     inside a quoted string or a comment opens nothing at all. The stack is what says
     which of the two we are in, which a depth counter cannot.
+
+    Two more things a JavaScript lexer knows, and this scanner has to: a `/` after an
+    operator, a `(` or a keyword opens a regular expression, whose quotes and backticks
+    delimit nothing (one `/"/g` inside a `${...}` flipped every string after it, and
+    579 lines of a shop's checkout script read as literal text); and a '...' or "..."
+    string never outlives its line, so whatever misleads the scanner on one line stops
+    misleading it at the next.
     """
     inside: set[int] = set()
     stack: list[tuple[str, int]] = []   # ("lit", 0) | ("sub", brace depth on entry)
@@ -195,6 +256,11 @@ def template_literal_lines(lines: list[str]) -> set[int]:
                 block = True
                 i += 2
                 continue
+            if c == "/" and _regex_may_start(line, i):
+                end = _regex_end(line, i)
+                if end is not None:
+                    i = end              # its quotes and backticks delimit nothing
+                    continue
             if c in "'\"":
                 quote = c
                 i += 1
@@ -210,6 +276,8 @@ def template_literal_lines(lines: list[str]) -> set[int]:
                 if stack and stack[-1][0] == "sub" and braces == stack[-1][1]:
                     stack.pop()          # back inside the literal that opened it
             i += 1
+        if quote and not line.endswith("\\"):
+            quote = ""                   # a '...' or "..." string never outlives its line
     return inside
 
 

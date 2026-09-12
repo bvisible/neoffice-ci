@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -152,6 +153,55 @@ const html = `<div>
 </div>`;
 """
         self.assertIn(2, self.L(src))
+
+    def test_a_quote_inside_a_regex_opens_no_string(self):
+        """`/"/g` in a placeholder opened a "string" that swallowed the closing brace and
+        backtick: every string after it flipped, and 579 lines of a shop's checkout
+        script read as literal text."""
+        src = r"""
+const match = cards.filter(`[data-address="${(selected || '').replace(/"/g, '\\"')}"]`);
+if (selected && !match.length) return;
+const html = `
+    <div>${x}</div>
+`;
+done();
+"""
+        self.assertEqual(self.L(src), {4, 5})
+
+    def test_a_backtick_inside_a_regex_opens_no_literal(self):
+        src = """
+const tick = /`/g;
+//// Neoffice — a comment, not text
+"""
+        self.assertEqual(self.L(src), set())
+
+    def test_a_division_is_not_a_regex(self):
+        src = """
+const half = (a + b) / 2, rate = total / count;
+const s = `
+    ${half}
+`;
+"""
+        self.assertEqual(self.L(src), {3, 4})
+
+    def test_a_string_never_outlives_its_line(self):
+        """A '...' or "..." string cannot span lines in JavaScript: what misled the
+        scanner on one line stops misleading it at the next."""
+        src = """
+const broken = 'never closed;
+const s = `
+    ${x}
+`;
+"""
+        self.assertEqual(self.L(src), {3, 4})
+
+    def test_a_long_line_full_of_divisions_scans_in_linear_time(self):
+        """Reading the line up to every `/` made the scan quadratic: 11 s for twenty
+        32 000-character lines of divisions, minutes for a minified bundle in CI."""
+        lines = ["a = b / c; " * 3000] * 20
+        started = time.perf_counter()
+        fork_markers.template_literal_lines(lines)
+        self.assertLess(time.perf_counter() - started, 2.0)
 
     def test_a_file_with_no_literal_at_all(self):
         self.assertEqual(self.L("const a = 1;\nconst b = 2;"), set())
