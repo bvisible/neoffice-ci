@@ -466,5 +466,56 @@ class TestAListedArtifactIsBuildOutput(unittest.TestCase):
         self.assertEqual(fork_markers.manifest_artifacts(["| Artifact | x |", "| --- | --- |", "| `*.css` | y |"]), [])
 
 
+class TestAPathWithASpace(unittest.TestCase):
+    """git ends a `---` / `+++` header line with a TAB when the path holds a space.
+
+    Read raw, helpdesk's `Settings/Assignment Rules/AssignmentRuleView.vue` ended in `.vue\\t`:
+    an unknown extension, so the file was declared to have no comment syntax, and verify
+    refused the markers written into it (neoffice-maintenance#358).
+    """
+
+    BEFORE = "<template>\n  <p>Hello</p>\n</template>\n"
+    AFTER = '<template>\n  <p>{{ __("Hello") }}</p>\n</template>\n'
+    MARKED = '<template>\n  <!-- //// Neoffice — wrapped in __() -->\n  <p>{{ __("Hello") }}</p>\n</template>\n'
+    PATH = "Assignment Rules/View.vue"
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        os.makedirs(os.path.join(self.repo, "Assignment Rules"))
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, content, commit=True):
+        with open(os.path.join(self.repo, self.PATH), "w") as f:
+            f.write(content)
+        if commit:
+            self.git("add", self.PATH)
+            self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def test_the_header_tab_is_dropped(self):
+        diff = "diff --git a/x y/z.vue b/x y/z.vue\nindex 1..2 100644\n--- a/x y/z.vue\t\n+++ b/x y/z.vue\t\n@@ -1 +1 @@\n-a\n+b\n"
+        f = fork_markers.parse_diff(diff)[0]
+        self.assertEqual((f["old_path"], f["path"]), ("x y/z.vue", "x y/z.vue"))
+
+    def test_an_unmarked_change_there_is_a_vue_hunk(self):
+        base = self.write(self.BEFORE)
+        head = self.write(self.AFTER)
+        found = fork_markers.check(self.repo, base, head, verbose=False)
+        self.assertEqual([(u["file"], u["kind"]) for u in found], [(self.PATH, "modified")])
+
+    def test_a_marker_there_passes_verify_then_check(self):
+        base = self.write(self.BEFORE)
+        changed = self.write(self.AFTER)
+        self.write(self.MARKED, commit=False)
+        self.assertEqual(fork_markers.verify(self.repo, changed, verbose=False), [])
+        head = self.write(self.MARKED)
+        self.assertEqual(fork_markers.check(self.repo, base, head, verbose=False), [])
+
+
 if __name__ == "__main__":
     unittest.main()

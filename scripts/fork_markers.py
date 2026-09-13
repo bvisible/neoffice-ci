@@ -319,6 +319,20 @@ def block_comment_lines(lines: list[str], kind: str) -> set[int]:
     return covered
 
 
+def _header_path(line: str, prefix: str) -> str:
+    """The path named by a `--- a/…` or `+++ b/…` header line of a diff.
+
+    git ends that line with a TAB when the path holds a space, so that patch(1) can tell
+    where the name stops. Read raw, `Settings/Assignment Rules/AssignmentRuleView.vue`
+    ended in `.vue\\t`, an extension nobody knows: the file was declared to have no
+    comment syntax, its hunks could only be excused by naming the path — tab included —
+    in the manifest, and verify refused every marker written into it. A red run no
+    marker could turn green (neoffice-maintenance#358).
+    """
+    path = line[len(prefix):] if line.startswith(prefix) else line[4:]
+    return path[:-1] if path.endswith("\t") else path
+
+
 def parse_diff(diff: str):
     """Yield (path, [hunk]) from a `git diff -U0` output. hunk = dict(old_start, old_count, new_start, new_count, added, removed)."""
     files = []
@@ -330,9 +344,9 @@ def parse_diff(diff: str):
         elif cur is None:
             continue
         elif line.startswith("--- "):
-            cur["old_path"] = None if line[4:] == "/dev/null" else line[6:] if line.startswith("--- a/") else line[4:]
+            cur["old_path"] = None if line[4:] == "/dev/null" else _header_path(line, "--- a/")
         elif line.startswith("+++ "):
-            cur["path"] = None if line[4:] == "/dev/null" else line[6:] if line.startswith("+++ b/") else line[4:]
+            cur["path"] = None if line[4:] == "/dev/null" else _header_path(line, "+++ b/")
         elif line.startswith("Binary files"):
             cur["binary"] = True
         elif line.startswith("@@"):
