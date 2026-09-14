@@ -25,7 +25,10 @@ carry a `#` marker, and the lines above it are more docstring, so no placement c
 satisfy the check (neoffice-maintenance#293). Files that cannot carry comments (JSON,
 PO/MO, images, lockfiles, built assets) are flagged unless NEOFFICE_FORK_MARKERS.md at HEAD
 names their path. A committed build artifact is skipped when the manifest names it (full
-path or glob) in the first column of a table headed `| Artifact |`.
+path or glob) in the first column of a table headed `| Artifact |`. A binary file (an image,
+a font, a wasm module) may also be matched by a path or glob in the first column of a table
+headed `| Binary |`, which gives the reason once for a whole set of files
+(neoffice-maintenance#414).
 """
 from __future__ import annotations
 
@@ -333,6 +336,31 @@ def _header_path(line: str, prefix: str) -> str:
     return path[:-1] if path.endswith("\t") else path
 
 
+def _binary_paths(line: str) -> tuple[str | None, str | None]:
+    """The (old, new) paths of a `Binary files a/… and b/… differ` line; None stands for /dev/null.
+
+    A binary diff has no `--- a/…` / `+++ b/…` header: this line is the only place git names the
+    file. Read from the headers alone, every binary came out without a path and was skipped as
+    a deleted file, so an image, a font or a wasm module we changed never reached the manifest
+    check (neoffice-maintenance#414). A name may itself hold " and ", so each split is tried and
+    the one whose two sides name the same file wins; a renamed binary takes the first valid one.
+    """
+    body = line[len("Binary files "):]
+    if body.endswith(" differ"):
+        body = body[: -len(" differ")]
+    first_valid = None
+    start = body.find(" and ")
+    while start >= 0:
+        old, new = body[:start], body[start + len(" and "):]
+        if (old == "/dev/null" or old.startswith("a/")) and (new == "/dev/null" or new.startswith("b/")):
+            pair = (None if old == "/dev/null" else old[2:], None if new == "/dev/null" else new[2:])
+            if None in pair or pair[0] == pair[1]:
+                return pair
+            first_valid = first_valid or pair
+        start = body.find(" and ", start + 1)
+    return first_valid or (None, None)
+
+
 def parse_diff(diff: str):
     """Yield (path, [hunk]) from a `git diff -U0` output. hunk = dict(old_start, old_count, new_start, new_count, added, removed)."""
     files = []
@@ -349,6 +377,9 @@ def parse_diff(diff: str):
             cur["path"] = None if line[4:] == "/dev/null" else _header_path(line, "+++ b/")
         elif line.startswith("Binary files"):
             cur["binary"] = True
+            old, new = _binary_paths(line)
+            cur["old_path"] = cur["old_path"] or old
+            cur["path"] = cur["path"] or new
         elif line.startswith("@@"):
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
             old_start = int(m.group(1))
@@ -449,16 +480,10 @@ def enclosing_tag_line(lines: list[str], line_no: int) -> int | None:
     return None
 
 
-def manifest_artifacts(manifest: list[str]) -> list[str]:
-    """Path patterns named in the first column of a manifest table headed `| Artifact |`.
-
-    A commit-the-build fork keeps compiled output in git (wiki's tailwind.css, helpdesk's
-    public/desk/**). A marker written INTO an artifact is wiped by the next build and the check
-    goes red again, on a file nobody may hand-edit — so the decision is marked at its source
-    (the `.gitignore` that un-ignores the output, the generator) and the manifest names the
-    artifacts in a table. That table is what this reads. Only entries holding a `/` count: a
-    bare `*.css` would excuse every stylesheet of the fork.
-    """
+def manifest_table(manifest: list[str], header: str) -> list[str]:
+    """Path patterns named in the first column of the manifest tables whose first header cell
+    starts with `header`. Only entries holding a `/` count: a bare `*.css` would excuse every
+    stylesheet of the fork."""
     patterns: list[str] = []
     in_table = False
     for line in manifest:
@@ -468,10 +493,34 @@ def manifest_artifacts(manifest: list[str]) -> list[str]:
             continue
         first = row.strip("|").split("|")[0].strip()
         if not in_table:
-            in_table = first.lower().startswith("artifact")
+            in_table = first.lower().startswith(header)
             continue
         patterns += [p for p in re.findall(r"`([^`\s]+)`", first) if "/" in p]
     return patterns
+
+
+def manifest_artifacts(manifest: list[str]) -> list[str]:
+    """Path patterns named in the first column of a manifest table headed `| Artifact |`.
+
+    A commit-the-build fork keeps compiled output in git (wiki's tailwind.css, helpdesk's
+    public/desk/**). A marker written INTO an artifact is wiped by the next build and the check
+    goes red again, on a file nobody may hand-edit — so the decision is marked at its source
+    (the `.gitignore` that un-ignores the output, the generator) and the manifest names the
+    artifacts in a table. That table is what this reads.
+    """
+    return manifest_table(manifest, "artifact")
+
+
+def manifest_binaries(manifest: list[str]) -> list[str]:
+    """Path patterns named in the first column of a manifest table headed `| Binary |`.
+
+    A binary diff has no line a marker could sit on, so a binary we add or change is excused by
+    the manifest alone. Naming each file suits a logo; forty-seven PWA splash screens would bury
+    the manifest under a list nobody reads, so the table takes a glob and gives the reason once
+    (neoffice-maintenance#414). It excuses binaries only: a JSON file keeps needing its own
+    entry, its diff is text a reader can follow.
+    """
+    return manifest_table(manifest, "binary")
 
 
 def is_listed_artifact(path: str, patterns: list[str]) -> bool:
@@ -492,6 +541,7 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
     manifest = head_lines(head, MANIFEST, repo)
     manifest_text = "\n".join(manifest)
     artifacts = manifest_artifacts(manifest)
+    binaries = manifest_binaries(manifest)
     unmarked = []
     for f in parse_diff(diff):
         path = f["path"]
@@ -508,8 +558,13 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
         if upstream_base and same_as_upstream(repo, upstream_base, head, path):
             continue
         if kind == "none" or f["binary"]:
-            if path not in manifest_text:
-                unmarked.append({"file": path, "kind": "not-commentable", "new_start": 0, "new_count": 0, "why": f"no comment syntax — needs an entry naming the path in {MANIFEST}", "snippet": []})
+            if path not in manifest_text and not (f["binary"] and is_listed_artifact(path, binaries)):
+                why = (
+                    f"binary file — needs its path in {MANIFEST}, or a `| Binary |` table entry matching it"
+                    if f["binary"]
+                    else f"no comment syntax — needs an entry naming the path in {MANIFEST}"
+                )
+                unmarked.append({"file": path, "kind": "not-commentable", "new_start": 0, "new_count": 0, "why": why, "snippet": []})
             continue
         lines = head_lines(head, path, repo)
         if is_own_file(lines):

@@ -517,5 +517,88 @@ class TestAPathWithASpace(unittest.TestCase):
         self.assertEqual(fork_markers.check(self.repo, base, head, verbose=False), [])
 
 
+class TestBinaryFiles(unittest.TestCase):
+    """A binary diff has no `---`/`+++` header, so binaries used to come out without a path and
+    were skipped as deleted files: an image or a font we changed never met the manifest (#414)."""
+
+    PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
+    TABLE = "| Binary | Why |\n|---|---|\n| `app/public/pdfjs/*` | vendored viewer, bytes untouched |\n"
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        self.put("README.md", b"fork\n")
+        self.base = self.commit()
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def put(self, path, data):
+        full = os.path.join(self.repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(data if isinstance(data, bytes) else data.encode())
+
+    def commit(self):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def flagged(self):
+        return [u["file"] for u in fork_markers.check(self.repo, self.base, self.commit(), verbose=False)]
+
+    def test_an_added_binary_is_flagged(self):
+        self.put("app/public/images/logo.png", self.PNG)
+        self.assertEqual(self.flagged(), ["app/public/images/logo.png"])
+
+    def test_a_changed_binary_is_flagged(self):
+        self.put("app/public/images/logo.png", self.PNG)
+        self.base = self.commit()
+        self.put("app/public/images/logo.png", self.PNG[::-1])
+        self.assertEqual(self.flagged(), ["app/public/images/logo.png"])
+
+    def test_a_deleted_binary_is_not_flagged(self):
+        self.put("app/public/images/logo.png", self.PNG)
+        self.base = self.commit()
+        os.remove(os.path.join(self.repo, "app/public/images/logo.png"))
+        self.assertEqual(self.flagged(), [])
+
+    def test_a_binary_named_in_the_manifest_passes(self):
+        self.put("app/public/images/logo.png", self.PNG)
+        self.put(fork_markers.MANIFEST, "- `app/public/images/logo.png`: our logo\n")
+        self.assertEqual(self.flagged(), [])
+
+    def test_a_binary_matched_by_the_binary_table_passes(self):
+        self.put("app/public/pdfjs/web/cmaps/Adobe-GB1-0.bcmap", self.PNG)
+        self.put(fork_markers.MANIFEST, self.TABLE)
+        self.assertEqual(self.flagged(), [])
+
+    def test_the_binary_table_excuses_binaries_only(self):
+        self.put("app/public/pdfjs/web/viewer.json", '{"locale": "fr"}\n')
+        self.put(fork_markers.MANIFEST, self.TABLE)
+        self.assertEqual(self.flagged(), ["app/public/pdfjs/web/viewer.json"])
+
+    def test_a_binary_whose_name_holds_a_space_keeps_it(self):
+        self.put("app/public/images/brand logo.png", self.PNG)
+        self.assertEqual(self.flagged(), ["app/public/images/brand logo.png"])
+
+
+class TestBinaryPaths(unittest.TestCase):
+    def test_a_changed_file(self):
+        self.assertEqual(fork_markers._binary_paths("Binary files a/x/y.png and b/x/y.png differ"), ("x/y.png", "x/y.png"))
+
+    def test_an_added_file(self):
+        self.assertEqual(fork_markers._binary_paths("Binary files /dev/null and b/x.png differ"), (None, "x.png"))
+
+    def test_a_deleted_file(self):
+        self.assertEqual(fork_markers._binary_paths("Binary files a/x.png and /dev/null differ"), ("x.png", None))
+
+    def test_a_name_that_holds_and(self):
+        line = "Binary files a/cats and dogs.png and b/cats and dogs.png differ"
+        self.assertEqual(fork_markers._binary_paths(line), ("cats and dogs.png", "cats and dogs.png"))
+
+
 if __name__ == "__main__":
     unittest.main()
