@@ -231,7 +231,19 @@ jobs:
             -m "Comment-only, written by the fork-markers workflow (bvisible/neoffice-ci) from the commit messages of the range. TO REVIEW markers need a human reason."
           for i in 1 2 3; do
             git push origin "HEAD:${{ github.ref_name }}" && break
-            git -c user.name="neoffice-fork-bot" -c user.email="fork-bot@neoffice.ch" pull --rebase origin "${{ github.ref_name }}" || exit 1
+            # A conflict here is almost always build output that another job rewrites: the marker
+            # pass wrote a `////` into it, that job pushed its own version in the same minute, and
+            # no rebase can reconcile two machines writing the same generated line. Bailing out on
+            # the spot left the tree mid-rebase and dropped the WHOLE marker commit -- the
+            # legitimate markers of the same range with it -- behind git's own `hint:`, which says
+            # nothing about what to do. Three red runs on one fork before anyone read why
+            # (neoffice-maintenance#626). Abort cleanly, and name the fix.
+            if ! git -c user.name="neoffice-fork-bot" -c user.email="fork-bot@neoffice.ch" \
+                 pull --rebase origin "${{ github.ref_name }}"; then
+              git rebase --abort || true
+              echo "::error::the rebase conflicted, so the marker commit was dropped (nothing was pushed). The conflicting files are almost certainly build output another job rewrites -- declare them in an | Artifact | table in NEOFFICE_FORK_MARKERS.md, as bvisible/mint and bvisible/suite do, instead of letting the pass mark them."
+              exit 1
+            fi
           done
           echo "new_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "pushed $(git rev-parse --short HEAD)"
