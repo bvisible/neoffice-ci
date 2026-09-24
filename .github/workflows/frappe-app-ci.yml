@@ -353,14 +353,15 @@ jobs:
         # The apt wkhtmltopdf is the unpatched-Qt build: it ignores frappe's switches and aborts
         # on the first asset it cannot fetch ("HostNotFoundError"); the wkhtmltox release build is
         # what frappe/erpnext/hrms CIs install. Falls back to apt if the release is unreachable.
-        # The runner image ships Google Chrome's apt repository, and that repository serves
-        # index files that fail apt's hash check now and then ("Hash Sum mismatch",
-        # 2026-09-09, three runs in a row). One foreign repository must not take the whole
-        # `apt-get update` down — and with it mariadb-client, which is what every later step
-        # dies on ("mariadb: command not found", exit 127). Chrome is not needed from apt here:
-        # its source is dropped, and the update is retried once before giving up.
+        # The runner image ships foreign apt repositories, and each one has taken the whole
+        # `apt-get update` down on its own: Google Chrome's served index files that fail
+        # apt's hash check ("Hash Sum mismatch", 2026-09-09, three runs in a row), then
+        # Microsoft's answered "403 Forbidden ... is no longer signed" (2026-09-24, a nightly
+        # run failed before any test). With the update gone goes mariadb-client, which is what
+        # every later step dies on ("mariadb: command not found", exit 127). Nothing here needs
+        # them: only Ubuntu's own archives are kept, and the update is retried once.
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
+          sudo find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) ! -name 'ubuntu*' -print -delete
           sudo apt-get update -q || (sleep 15 && sudo apt-get update -q)
           sudo apt-get install -yq mariadb-client xfonts-75dpi xfonts-base
           if wget -q -O /tmp/wkhtmltox.deb https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb; then
