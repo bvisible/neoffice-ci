@@ -123,6 +123,26 @@ jobs:
         env:
           LOCALES: ${{ inputs.locales }}
 
+      - name: Keep the translations the code still uses
+        # update-po-files drops every entry the extractor did not find, and the extractor
+        # misses a __() in an HTML attribute of a JS template, a label translated through a
+        # variable, a custom field description... Put back each translated entry whose
+        # source text the app still carries, from the catalogue as committed
+        # (neoffice-maintenance#866: 16 translations lost in one night).
+        working-directory: /home/runner/frappe-bench
+        run: |
+          curl -fsSL -o /tmp/keep_used_translations.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/keep_used_translations.py
+          BENCH_APP="apps/${{ inputs.app }}"
+          for loc in ${LOCALES//,/ }; do
+            for po in $(cd "$BENCH_APP" && find . -path "*/locale/${loc}.po"); do
+              ~/frappe-bench/env/bin/python /tmp/keep_used_translations.py \
+                --before "$GITHUB_WORKSPACE/$po" --after "$BENCH_APP/$po" --source "$BENCH_APP"
+            done
+          done
+        env:
+          LOCALES: ${{ inputs.locales }}
+
       - name: Translate the empty msgstr with Sonnet
         working-directory: /home/runner/frappe-bench
         run: |
