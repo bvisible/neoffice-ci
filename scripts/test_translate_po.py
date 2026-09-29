@@ -298,5 +298,197 @@ class TestTheRealCommandLine(unittest.TestCase):
             self.assertEqual([e.msgstr for e in polib.pofile(str(po))], ["Enregistrer"] * self.MSGIDS)
 
 
+def _po(path, entries):
+    """Write a PO file. Each entry is (msgid, msgstr) or (msgid, msgstr, msgctxt)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    catalogue = polib.POFile()
+    catalogue.metadata = {"Language": "fr", "Content-Type": "text/plain; charset=UTF-8"}
+    for entry in entries:
+        msgid, msgstr, *rest = entry
+        catalogue.append(polib.POEntry(msgid=msgid, msgstr=msgstr, msgctxt=rest[0] if rest else None))
+    catalogue.save(str(path))
+    return path
+
+
+class TestTheCoreSpeaksFirst(unittest.TestCase):
+    """A bare msgid the bench already translates is left EMPTY, not translated again (#619).
+
+    Frappe merges every app's catalogue into one dictionary, last app winning, so a bare msgid this app
+    translates replaces the core's word on every screen: « Solde » read « Équilibre » and « Commande »
+    « Ordre » across the whole desk of an instance, because a fitness app said so. The night used to
+    translate every empty msgstr, the core's words included, so deleting such an entry from an app's
+    catalogue lasted until the next night. An empty value is ignored by Frappe: the desk keeps the
+    core's word, and the core can correct it later without a stale copy overriding the correction.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.bench = Path(self._tmp.name) / "frappe-bench"
+        self.apps = self.bench / "apps"
+        _po(
+            self.apps / "frappe" / "frappe" / "locale" / "fr.po",
+            [
+                ("Save", "Enregistrer"),
+                ("Back", "Retour"),
+                ("Group Class", "Group Class"),  # an identity: the English word said back
+            ],
+        )
+        self.target = _po(
+            self.apps / "myapp" / "myapp" / "locale" / "fr.po",
+            [("Save", ""), ("Brand new", ""), ("Group Class", "")],
+        )
+
+    def _core_entry(self, app, entries):
+        return _po(self.apps / app / app / "locale" / "fr.po", entries)
+
+    def _run(self, *extra, path=None):
+        """(exit code, output, msgids the model was asked for) of one `main()` on the target file."""
+        asked = []
+
+        def model(command, **kwargs):
+            prompt = command[command.index("-p") + 1]
+            items = json.loads(prompt.split("Translate these items:\n", 1)[1])
+            asked.extend(item["s"] for item in items)
+            answer = json.dumps([{"i": item["i"], "t": "FR " + item["s"]} for item in items], ensure_ascii=False)
+            return _cli(stdout=json.dumps({"is_error": False, "result": answer}))
+
+        argv = ["translate_po.py", str(path or self.target), "--locale", "fr", *extra]
+        out = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(translate_po.subprocess, "run", side_effect=model):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = translate_po.main()
+        return code, out.getvalue(), asked
+
+    def _entries(self, path=None):
+        return {(e.msgid, e.msgctxt): e.msgstr for e in polib.pofile(str(path or self.target))}
+
+    def test_a_msgid_frappe_translates_is_not_asked_and_stays_empty(self):
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(asked.count("Save"), 0, "the core's word must not be translated again")
+        self.assertEqual(self._entries()[("Save", None)], "")
+        self.assertIn("left empty", output)
+        self.assertIn("'Save' (frappe)", output)
+
+    def test_a_msgid_the_core_does_not_know_is_translated_as_before(self):
+        code, output, asked = self._run()
+        self.assertEqual(self._entries()[("Brand new", None)], "FR Brand new")
+        self.assertIn("Brand new", asked)
+
+    def test_the_csv_of_a_dependency_app_counts_too(self):
+        csv_path = self.apps / "erpnext" / "erpnext" / "translations" / "fr.csv"
+        csv_path.parent.mkdir(parents=True)
+        csv_path.write_text("Customer,Client\nOrder,Commande\n", encoding="utf-8")
+        _po(self.target, [("Customer", ""), ("Brand new", "")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, ["Brand new"])
+        self.assertIn("erpnext", output)
+
+    def test_a_csv_row_with_a_context_is_no_bare_word(self):
+        csv_path = self.apps / "erpnext" / "erpnext" / "translations" / "fr.csv"
+        csv_path.parent.mkdir(parents=True)
+        csv_path.write_text("Plan,Forfait,Subscription\n", encoding="utf-8")
+        _po(self.target, [("Plan", "")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, ["Plan"])
+
+    def test_the_po_of_an_app_wins_over_its_csv_as_frappe_merges_them(self):
+        """The CSV says a word, the PO says the identity: the merged word is the identity, which says nothing."""
+        csv_path = self.apps / "erpnext" / "erpnext" / "translations" / "fr.csv"
+        csv_path.parent.mkdir(parents=True)
+        csv_path.write_text("Item,Article\n", encoding="utf-8")
+        self._core_entry("erpnext", [("Item", "Item")])
+        _po(self.target, [("Item", "")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, ["Item"])
+
+    def test_an_identity_in_the_core_says_nothing_so_the_model_is_asked(self):
+        """`Group Class` said back in English is no word the desk has: a real translation is still wanted."""
+        code, output, asked = self._run()
+        self.assertIn("Group Class", asked)
+        self.assertEqual(self._entries()[("Group Class", None)], "FR Group Class")
+
+    def test_an_entry_with_a_context_is_another_key_and_is_translated_as_before(self):
+        _po(self.target, [("Save", "", "Gym"), ("Save", "")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, ["Save"], "only the entry with a context is asked")
+        entries = self._entries()
+        self.assertEqual(entries[("Save", "Gym")], "FR Save")
+        self.assertEqual(entries[("Save", None)], "")
+
+    def test_a_context_entry_of_the_core_is_no_bare_word(self):
+        self._core_entry("erpnext", [("Stock", "Stock physique", "Warehouse")])
+        _po(self.target, [("Stock", "")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, ["Stock"])
+
+    def test_an_obsolete_or_plural_entry_of_the_core_says_nothing(self):
+        locale = self.apps / "erpnext" / "erpnext" / "locale"
+        locale.mkdir(parents=True)
+        catalogue = polib.POFile()
+        catalogue.metadata = {"Language": "fr"}
+        catalogue.append(polib.POEntry(msgid="Old", msgstr="Ancien", obsolete=True))
+        catalogue.append(polib.POEntry(msgid="File", msgid_plural="Files", msgstr_plural={0: "Fichier", 1: "Fichiers"}))
+        catalogue.save(str(locale / "fr.po"))
+        _po(self.target, [("Old", ""), ("File", "")])
+        code, output, asked = self._run()
+        self.assertEqual(sorted(asked), ["File", "Old"])
+
+    def test_the_apps_own_catalogue_is_not_the_vocabulary(self):
+        csv_path = self.apps / "myapp" / "myapp" / "translations" / "fr.csv"
+        csv_path.parent.mkdir(parents=True)
+        csv_path.write_text("Word,Mot\n", encoding="utf-8")
+        _po(self.target, [("Word", "")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, ["Word"])
+
+    def test_when_the_core_knows_every_empty_msgid_the_model_is_not_called_and_the_run_succeeds(self):
+        _po(self.target, [("Save", ""), ("Back", "")])
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(asked, [])
+        self.assertIn("nothing to do", output)
+        self.assertEqual(self._entries(), {("Save", None): "", ("Back", None): ""})
+
+    def test_what_is_left_to_the_core_does_not_count_against_the_cap(self):
+        _po(self.target, [("Save", ""), ("Back", ""), ("New A", ""), ("New B", "")])
+        code, output, asked = self._run("--max", "1")
+        self.assertEqual(asked, ["New A"])
+        self.assertEqual(self._entries()[("New B", None)], "")
+
+    def test_a_translation_already_there_is_never_touched(self):
+        _po(self.target, [("Save", "Sauvegarder"), ("Brand new", "")])
+        code, output, asked = self._run()
+        self.assertEqual(self._entries()[("Save", None)], "Sauvegarder")
+
+    def test_outside_a_bench_everything_is_translated_as_before(self):
+        loose = _po(Path(self._tmp.name) / "elsewhere" / "fr.po", [("Save", ""), ("Brand new", "")])
+        code, output, asked = self._run(path=loose)
+        self.assertEqual(sorted(asked), ["Brand new", "Save"])
+        self.assertNotIn("left empty", output)
+
+    def test_a_broken_dependency_file_does_not_stop_the_night(self):
+        broken = self.apps / "erpnext" / "erpnext" / "locale" / "fr.po"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("this is not a PO file\nmsgid\n", encoding="utf-8")
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertIn("Brand new", asked)
+
+    def test_the_vocabulary_names_the_app_that_speaks_and_reads_frappe_first(self):
+        self._core_entry("erpnext", [("Customer", "Client"), ("Save", "Sauvegarder")])
+        vocabulary, read = translate_po.core_vocabulary(str(self.target), "fr")
+        self.assertEqual(read, ["frappe", "erpnext"])
+        self.assertEqual(vocabulary["Save"], ("frappe", "Enregistrer"), "the first app to speak is the one named")
+        self.assertEqual(vocabulary["Customer"], ("erpnext", "Client"))
+        self.assertNotIn("Group Class", vocabulary)
+        self.assertNotIn("Brand new", vocabulary)
+
+    def test_the_app_being_translated_is_not_read_as_its_own_vocabulary(self):
+        vocabulary, read = translate_po.core_vocabulary(str(self.target), "fr")
+        self.assertNotIn("myapp", read)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

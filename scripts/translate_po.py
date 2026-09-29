@@ -13,6 +13,14 @@ Design, on purpose:
 - Never writes a translation identical to the source. Frappe merges every app's
   catalogue into one flat dict, last app installed winning, so an identity does
   not say nothing — it erases what another app translated, site-wide (#335).
+- Never asks for a word the desk already has. The same flat dictionary means a bare
+  msgid this app translates REPLACES the core's word on every screen (« Solde » read
+  « Équilibre », « Commande » « Ordre »: neoffice-maintenance#619). So a bare msgid that
+  frappe or a dependency app of the bench (erpnext, payments, neoffice_theme…) already
+  translates is left EMPTY: Frappe ignores an empty value, the desk keeps the core's word,
+  and the core can correct it later without a stale copy here overriding the correction.
+  Copying the core's word instead would freeze it. A msgid with a context is another key
+  (`msgid:context`) and is translated as before.
 - Placeholders, format specifiers and HTML are preserved verbatim (the model is
   told, and we verify every returned string still carries them; a mismatch is
   dropped, never written).
@@ -34,11 +42,13 @@ staying green for as long as the limit lasts.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import polib
 
@@ -138,6 +148,89 @@ def _claude(prompt: str, model: str) -> str:
     raise ClaudeCallError(f"claude exited {proc.returncode}: {detail[:200] or 'no message'}")
 
 
+# --- the words the desk already has --------------------------------------------------------------
+
+def _read_po_words(path: Path) -> dict[str, str]:
+    """{bare msgid: msgstr} of one PO file. Entries with a context, plurals, obsolete and empty ones say
+    nothing a bare msgid could collide with, and are left out. An unreadable file reads as empty: the
+    vocabulary is a help, never a reason to stop a night. A file that is not there is normal (frappe has
+    no CSV, most apps have no PO for a locale) and says nothing."""
+    if not path.is_file():
+        return {}
+    try:
+        catalogue = polib.pofile(str(path))
+    except (OSError, ValueError, UnicodeDecodeError) as e:  # polib raises OSError on a syntax error
+        print(f"  ! vocabulary: cannot read {path}: {e}", file=sys.stderr)
+        return {}
+    return {
+        e.msgid: e.msgstr
+        for e in catalogue
+        if e.msgid and e.msgstr.strip() and not (e.obsolete or e.msgctxt or e.msgid_plural)
+    }
+
+
+def _read_csv_words(path: Path) -> dict[str, str]:
+    """{bare msgid: translation} of a Frappe `translations/<lang>.csv` (source, translation[, context])."""
+    words: dict[str, str] = {}
+    if not path.is_file():
+        return words
+    try:
+        with open(path, encoding="utf-8", newline="") as fh:
+            for row in csv.reader(fh):
+                if len(row) >= 2 and row[0] and row[1].strip() and not (len(row) > 2 and row[2].strip()):
+                    words[row[0]] = row[1]
+    except (OSError, UnicodeDecodeError, csv.Error) as e:
+        print(f"  ! vocabulary: cannot read {path}: {e}", file=sys.stderr)
+    return words
+
+
+def _app_words(package_dir: Path, lang: str) -> dict[str, str]:
+    """What one app's SOURCE files translate, the way Frappe merges them: the CSV, then the PO on top.
+
+    An identity (the English word said back) is dropped after the merge: it is no translation, it is the
+    veto `translate_batch` refuses to write, and it must not stop a real translation being asked for.
+    """
+    words = _read_csv_words(package_dir / "translations" / f"{lang}.csv")
+    words.update(_read_po_words(package_dir / "locale" / f"{lang}.po"))
+    return {k: v for k, v in words.items() if v.strip() != k.strip()}
+
+
+def core_vocabulary(po_path: str, lang: str) -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """({bare msgid: (app, word)}, [apps read]) — what the bench around this PO file already translates.
+
+    The bench is the one the workflow builds: `apps/frappe`, then every dependency app it got next to
+    the app being translated (erpnext, payments, neoffice_theme… as `install_apps` says). The app's own
+    catalogue is not part of it. Outside a bench (a laptop, a test) nothing is known and everything is
+    translated as before. Read from source files: no site, no import of any app, no compiled `.mo`.
+    """
+    here = Path(po_path).resolve()
+    apps_dir = next((d for d in here.parents if d.name == "apps" and (d / "frappe").is_dir()), None)
+    if apps_dir is None:
+        return {}, []
+    target = here.relative_to(apps_dir).parts[0]
+    siblings = sorted(
+        (d for d in apps_dir.iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != target),
+        key=lambda d: (d.name != "frappe", d.name),
+    )
+    vocabulary: dict[str, tuple[str, str]] = {}
+    read: list[str] = []
+    for app in siblings:
+        package = next((d for d in (app / app.name, app / app.name.replace("-", "_")) if d.is_dir()), None)
+        if package is None:
+            continue
+        words = _app_words(package, lang)
+        if words:
+            read.append(app.name)
+        for msgid, word in words.items():
+            vocabulary.setdefault(msgid, (app.name, word))
+    return vocabulary, read
+
+
+def _left_to_the_core(entry: polib.POEntry, vocabulary: dict[str, tuple[str, str]]) -> bool:
+    """True for an empty bare msgid the core already translates (see the design notes above)."""
+    return not (entry.msgctxt or entry.msgid_plural) and entry.msgid in vocabulary
+
+
 def _parse_json_array(text: str) -> list[dict]:
     text = text.strip()
     # tolerate a ```json fence or leading prose
@@ -217,8 +310,20 @@ def main() -> int:
         po.metadata["Language"] = args.locale
 
     todo = [e for e in po if not e.obsolete and e.msgid and not e.msgstr]
+
+    # A bare msgid the core already translates stays empty (see the design notes): it is not asked, and
+    # it does not count against --max.
+    vocabulary, sources = core_vocabulary(args.po_path, args.locale)
+    left = [e for e in todo if _left_to_the_core(e, vocabulary)]
+    left_ids = {id(e) for e in left}
+    if left:
+        todo = [e for e in todo if id(e) not in left_ids]
+        print(f"{os.path.basename(args.po_path)}: {len(left)} untranslated msgid(s) left empty: the desk "
+              f"already has their word from {', '.join(sources)} — "
+              + ", ".join(f"{e.msgid!r} ({vocabulary[e.msgid][0]})" for e in left[:12])
+              + (" …" if len(left) > 12 else ""))
     if not todo:
-        print(f"{os.path.basename(args.po_path)}: 0 untranslated — nothing to do")
+        print(f"{os.path.basename(args.po_path)}: 0 to translate — nothing to do")
         po.save(args.po_path)  # persist the Language header fix if any
         return 0
 
@@ -251,9 +356,9 @@ def main() -> int:
                 filled += 1
 
     po.save(args.po_path)
+    still_empty = len([e for e in po if not e.obsolete and e.msgid and not e.msgstr and id(e) not in left_ids])
     print(f"{os.path.basename(args.po_path)}: filled {filled}/{len(todo)} "
-          f"(of {len([e for e in po if not e.obsolete and e.msgid and not e.msgstr]) + filled} "
-          f"untranslated) with {args.model}")
+          f"(of {still_empty + filled} to translate) with {args.model}")
     if not answered:
         # Every call failed (no CLI, bad token, a wall of errors): nothing was even attempted for real.
         print(f"::error::every Claude call failed ({failed} batch(es)) and nothing was translated: "

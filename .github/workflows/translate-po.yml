@@ -9,6 +9,11 @@
 # verified by the translator (scripts/translate_po.py in this repo); a returned
 # string that lost one is dropped, never written. PO only, never CSV (fleet rule).
 #
+# A bare msgid that frappe or a dependency app of this bench (`install_apps`) already
+# translates is left EMPTY, not translated again: Frappe merges every app into one
+# dictionary, so this app's word would replace the core's on every screen (#619). List
+# the apps whose vocabulary the app must not override in `install_apps`.
+#
 # Caller (in the app repo, .github/workflows/translate.yml):
 #   name: Translate
 #   on:
