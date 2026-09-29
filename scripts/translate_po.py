@@ -21,9 +21,15 @@ Design, on purpose:
   reasoning (fleet rule: never a bigger model for translation).
 - Fixes the PO `Language:` header while here (an empty one kills `bench build`).
 
-Exit 0 whether or not anything changed; prints a one-line summary. Never raises
-into the workflow on a single batch failure — it logs and moves on, leaving those
-msgids empty for the next run.
+Exit 0 whether or not anything changed, and after a partial failure; prints a
+one-line summary. A single failed batch never raises into the workflow: it logs and
+moves on, leaving those msgids empty for the next run.
+
+Exit 1 in the two cases where going green would hide that nothing can be translated
+(#827): the Claude account behind CI has reached its usage limit (every later call
+fails the same way, so the run stops at the first batch), or every call of the run
+failed. The night then fails ONCE, with the reason on the run's summary, instead of
+staying green for as long as the limit lasts.
 """
 from __future__ import annotations
 
@@ -67,13 +73,53 @@ RULES = (
 
 LANG_NAMES = {"fr": "French", "de": "German", "it": "Italian", "en": "English"}
 
+# What the CLI says when the account behind CI has used its allowance: « You've hit your weekly limit
+# · resets Sep 28, 8pm (UTC) », « Claude usage limit reached. Your limit will reset at 8pm », « 5-hour
+# limit reached ∙ resets 3pm ». Only ever read on a call that FAILED: a good answer is never scanned,
+# so a string of the app that happens to say « resets » cannot be taken for a limit.
+_LIMIT_MESSAGE = re.compile(
+    r"hit your .*limit|weekly limit|usage limit|session limit|rate limit|limit reached|limit will reset"
+    r"|\bresets\b",
+    re.IGNORECASE,
+)
+
+
+class AccountLimitError(RuntimeError):
+    """The Claude account behind CI has reached its usage limit: no later call can work until it resets."""
+
+
+class ClaudeCallError(RuntimeError):
+    """One call to the Claude CLI failed for a reason that may pass (timeout, transient error, no CLI)."""
+
 
 def _tokens(s: str) -> list[str]:
     return sorted(_PLACEHOLDER.findall(s))
 
 
+def _read_reply(stdout: str) -> tuple[bool, str]:
+    """(is_error, text) of what `claude -p --output-format json` printed on STDOUT."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return False, stdout  # some versions print the text directly
+    if isinstance(data, list):  # --verbose prints every message: the last "result" is the answer
+        data = next((m for m in reversed(data) if isinstance(m, dict) and m.get("type") == "result"), {})
+    if not isinstance(data, dict):
+        return False, stdout
+    return bool(data.get("is_error")), str(data.get("result") or "")
+
+
 def _claude(prompt: str, model: str) -> str:
-    """Call the Claude CLI in print mode. Returns the model's text or ''."""
+    """Call the Claude CLI in print mode and return the model's text.
+
+    Raises AccountLimitError when the account's usage limit is reached (every later call would fail
+    the same way, so the caller stops), and ClaudeCallError for any other failure of the call.
+
+    The CLI writes its error message on STDOUT, as JSON with `is_error`, and leaves stderr empty. This
+    function used to read stderr only: a limit came out as « claude exited 1: » with nothing after it,
+    the batch was skipped like any other, and the nightly translation stayed green for two nights with
+    0 of 189 strings filled (#827).
+    """
     try:
         proc = subprocess.run(
             ["claude", "-p", prompt, "--model", model, "--output-format", "json"],
@@ -82,15 +128,14 @@ def _claude(prompt: str, model: str) -> str:
             timeout=300,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:  # noqa: BLE001
-        print(f"  ! claude CLI call failed: {e}", file=sys.stderr)
-        return ""
-    if proc.returncode != 0:
-        print(f"  ! claude exited {proc.returncode}: {proc.stderr[:200]}", file=sys.stderr)
-        return ""
-    try:
-        return json.loads(proc.stdout).get("result", "") or ""
-    except json.JSONDecodeError:
-        return proc.stdout  # some versions print the text directly
+        raise ClaudeCallError(f"claude CLI call failed: {e}") from e
+    is_error, text = _read_reply(proc.stdout)
+    if proc.returncode == 0 and not is_error:
+        return text
+    detail = (text or proc.stderr or "").strip()
+    if _LIMIT_MESSAGE.search(detail):
+        raise AccountLimitError(detail[:300])
+    raise ClaudeCallError(f"claude exited {proc.returncode}: {detail[:200] or 'no message'}")
 
 
 def _parse_json_array(text: str) -> list[dict]:
@@ -107,7 +152,11 @@ def _parse_json_array(text: str) -> list[dict]:
 
 
 def translate_batch(items: list[str], lang: str, model: str) -> dict[int, str]:
-    """items -> {index: translation}, only for verified-safe translations."""
+    """items -> {index: translation}, only for verified-safe translations.
+
+    Raises AccountLimitError or ClaudeCallError when the call itself failed (see `_claude`); a call that
+    answered, with nothing safe to write, returns {}.
+    """
     numbered = [{"i": i, "s": s} for i, s in enumerate(items)]
     prompt = (
         RULES.format(lang_name=LANG_NAMES.get(lang, lang))
@@ -175,9 +224,27 @@ def main() -> int:
 
     todo = todo[: args.max]
     filled = 0
+    answered = 0  # calls that got an answer from the model, whatever was safe to write from it
+    failed = 0  # calls that did not
+    last_error = ""
     for start in range(0, len(todo), args.batch):
         chunk = todo[start : start + args.batch]
-        got = translate_batch([e.msgid for e in chunk], args.locale, args.model)
+        try:
+            got = translate_batch([e.msgid for e in chunk], args.locale, args.model)
+        except AccountLimitError as e:
+            # No later batch can work: stop at the first, keep what this file already holds (and the
+            # Language header fix), and FAIL the run once, with the reason, instead of going green.
+            po.save(args.po_path)
+            print(f"::error::Claude account limit reached: {e}. Nothing more can be translated until it "
+                  f"resets; {os.path.basename(args.po_path)} keeps {filled} new translation(s) of "
+                  f"{len(todo)} to do. Re-run this workflow after the reset.", flush=True)
+            return 1
+        except ClaudeCallError as e:
+            failed += 1
+            last_error = str(e)
+            print(f"  ! {e}", file=sys.stderr)
+            continue
+        answered += 1
         for i, entry in enumerate(chunk):
             if i in got:
                 entry.msgstr = got[i]
@@ -187,7 +254,12 @@ def main() -> int:
     print(f"{os.path.basename(args.po_path)}: filled {filled}/{len(todo)} "
           f"(of {len([e for e in po if not e.obsolete and e.msgid and not e.msgstr]) + filled} "
           f"untranslated) with {args.model}")
-    # non-zero would fail the workflow; a partial fill is still progress.
+    if not answered:
+        # Every call failed (no CLI, bad token, a wall of errors): nothing was even attempted for real.
+        print(f"::error::every Claude call failed ({failed} batch(es)) and nothing was translated: "
+              f"{last_error}", flush=True)
+        return 1
+    # A partial fill is still progress, and a batch that could not be read stays empty for the next run.
     return 0
 
 

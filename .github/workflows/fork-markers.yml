@@ -196,8 +196,8 @@ jobs:
           set -e
           echo "--- claude (tail) ---"; tail -c 3000 /tmp/fm/claude.log; echo
           git status --short | head -40
-          if [ $RC -ne 0 ] || grep -qiE "session limit|rate limit|usage limit|not logged in|invalid api key|authentication" /tmp/fm/claude.log; then
-            REASON=$(grep -iE "session limit|rate limit|usage limit|not logged in|invalid api key|authentication" /tmp/fm/claude.log | head -1)
+          if [ $RC -ne 0 ] || grep -qiE "session limit|weekly limit|hit your|rate limit|usage limit|not logged in|invalid api key|authentication" /tmp/fm/claude.log; then
+            REASON=$(grep -iE "session limit|weekly limit|hit your|rate limit|usage limit|not logged in|invalid api key|authentication" /tmp/fm/claude.log | head -1)
             echo "::error::Claude could not run the marker pass (exit $RC): ${REASON:-see the log above}. ${{ steps.check.outputs.unmarked }} hunks stay unmarked — re-run this workflow (workflow_dispatch with the same range) once the limit resets."
             git checkout -- . && git clean -fd
             exit 1
