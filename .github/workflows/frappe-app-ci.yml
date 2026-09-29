@@ -121,12 +121,17 @@ jobs:
     # neoffice_theme, which is private and legitimately full of client names.
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # Ten minutes, not three: a full-history checkout of a large repository alone can take
+    # most of three (a webshop pull request was cancelled at the limit, #720).
+    timeout-minutes: 10
     name: no client names (${{ inputs.app }})
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Only a push has a range to look at (`git cat-file -e $BEFORE` and the two-dot diff
+          # below, which need the commits behind the push). Every other event scans the whole
+          # tree with `git ls-files` and reads no history, so it fetches none (#720).
+          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
 
       - name: Fetch the guard
         run: |
