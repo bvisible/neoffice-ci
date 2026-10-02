@@ -565,6 +565,22 @@ def is_listed_artifact(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, p) for p in patterns)
 
 
+def manifest_names(manifest_text: str, path: str) -> bool:
+    """True when NEOFFICE_FORK_MARKERS.md names `path`, literally or by one of its backticked globs.
+
+    Only the tables headed `Artifact` or `Binary` excuse a path. A table headed `Path`, `File` or
+    anything else is prose to the check, and the author, who sees the path listed, does not know why
+    it is still asked for markers: that cost an investigation on mint (2026-09-22) and twice on raven
+    (2026-09-30, 2026-10-02: 24 hash lines of the rebuilt entry point). This lets the report say so.
+    """
+    if path in manifest_text:
+        return True
+    return any(
+        "/" in pattern and fnmatch.fnmatchcase(path, pattern)
+        for pattern in re.findall(r"`([^`\s]+)`", manifest_text)
+    )
+
+
 def same_as_upstream(repo: str, upstream_base: str, head: str, path: str) -> bool:
     """True when `path` at `head` is byte-identical to the same path at `upstream_base`.
 
@@ -634,7 +650,12 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
                 "file": path, "kind": "removed-only" if not added else "modified" if removed else "added",
                 "new_start": h["new_start"], "new_count": h["new_count"], "old_count": h["old_count"],
                 "snippet": (code_added or code_removed)[:3],
-                "why": "no `////` marker in the hunk nor within %d lines above it" % LOOKBACK,
+                "why": "no `////` marker in the hunk nor within %d lines above it" % LOOKBACK + (
+                    f"; {MANIFEST} names this path: if it is committed build output, the table that lists it "
+                    "must be headed `Artifact` (or `Binary`), the only words the check reads"
+                    if manifest_names(manifest_text, path)
+                    else ""
+                ),
             })
     if verbose or True:
         for u in unmarked:
