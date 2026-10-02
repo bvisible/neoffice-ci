@@ -339,6 +339,19 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
+      - name: Test modules that break the run for everyone (static, seconds)
+        # A module-level pytest skip kills the Frappe unittest run at collection: not one test runs (an error here,
+        # before ten minutes of bench). A `patch.object(frappe.local, <attribute>, create=True)` deletes the attribute
+        # for the rest of the run (a warning: some apps still carry it on attributes that fail nothing yet). Both cost
+        # a red Tests run on 02.10; see scripts/check_test_hygiene.py. A guard that cannot be fetched must not block.
+        run: |
+          if curl -sfL -o /tmp/check_test_hygiene.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_test_hygiene.py; then
+            python3 /tmp/check_test_hygiene.py --root .
+          else
+            echo "::warning::the test hygiene check could not be fetched: skipped"
+          fi
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
