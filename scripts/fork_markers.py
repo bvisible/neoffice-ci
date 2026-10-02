@@ -23,8 +23,8 @@ marker lives (neoffice-maintenance#354). A hunk made only of comment lines is a 
 itself, never flagged — and in a Python file a docstring counts as a comment: it cannot
 carry a `#` marker, and the lines above it are more docstring, so no placement could ever
 satisfy the check (neoffice-maintenance#293). Files that cannot carry comments (JSON,
-PO/MO, images, lockfiles, built assets) are flagged unless NEOFFICE_FORK_MARKERS.md at HEAD
-names their path. A committed build artifact is skipped when the manifest names it (full
+PO/MO, images, lockfiles, built assets, symlinks: a symlink holds a path, not text) are flagged unless
+NEOFFICE_FORK_MARKERS.md at HEAD names their path. A committed build artifact is skipped when the manifest names it (full
 path or glob) in the first column of a table headed `| Artifact |`. A binary file (an image,
 a font, a wasm module) may also be matched by a path or glob in the first column of a table
 headed `| Binary |`, which gives the reason once for a whole set of files
@@ -367,7 +367,7 @@ def parse_diff(diff: str):
     cur = None
     for line in diff.splitlines():
         if line.startswith("diff --git "):
-            cur = {"path": None, "old_path": None, "hunks": [], "binary": False}
+            cur = {"path": None, "old_path": None, "hunks": [], "binary": False, "symlink": False}
             files.append(cur)
         elif cur is None:
             continue
@@ -375,6 +375,8 @@ def parse_diff(diff: str):
             cur["old_path"] = None if line[4:] == "/dev/null" else _header_path(line, "--- a/")
         elif line.startswith("+++ "):
             cur["path"] = None if line[4:] == "/dev/null" else _header_path(line, "+++ b/")
+        elif line.startswith(("new file mode 120000", "new mode 120000")) or re.match(r"index \w+\.\.\w+ 120000$", line):
+            cur["symlink"] = True  # a link holds a path, not text: no marker can sit on it
         elif line.startswith("Binary files"):
             cur["binary"] = True
             old, new = _binary_paths(line)
@@ -557,13 +559,14 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
         # frontend/auto-imports.d.ts, 2026-09-11).
         if upstream_base and same_as_upstream(repo, upstream_base, head, path):
             continue
-        if kind == "none" or f["binary"]:
+        if kind == "none" or f["binary"] or f["symlink"]:
             if path not in manifest_text and not (f["binary"] and is_listed_artifact(path, binaries)):
-                why = (
-                    f"binary file — needs its path in {MANIFEST}, or a `| Binary |` table entry matching it"
-                    if f["binary"]
-                    else f"no comment syntax — needs an entry naming the path in {MANIFEST}"
-                )
+                if f["binary"]:
+                    why = f"binary file — needs its path in {MANIFEST}, or a `| Binary |` table entry matching it"
+                elif f["symlink"]:
+                    why = f"symlink — it holds a path, not text, so no marker can sit on it: needs an entry naming the path in {MANIFEST}"
+                else:
+                    why = f"no comment syntax — needs an entry naming the path in {MANIFEST}"
                 unmarked.append({"file": path, "kind": "not-commentable", "new_start": 0, "new_count": 0, "why": why, "snippet": []})
             continue
         lines = head_lines(head, path, repo)

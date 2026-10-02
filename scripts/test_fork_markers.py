@@ -585,6 +585,72 @@ class TestBinaryFiles(unittest.TestCase):
         self.assertEqual(self.flagged(), ["app/public/images/brand logo.png"])
 
 
+class TestSymlinks(unittest.TestCase):
+    """A symlink is a path, not text: no marker can sit on it. A fork that adds one (raven's WARP.md, a link to
+    CLAUDE.md for the Warp terminal) met the per-hunk rule against the one line of its target path and stayed
+    red on every push, whatever its author did (02.10)."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        self.put("CLAUDE.md", "working notes\n")
+        self.put("OTHER.md", "other notes\n")
+        self.base = self.commit()
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def put(self, path, data):
+        full = os.path.join(self.repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(data)
+
+    def link(self, path, target):
+        os.symlink(target, os.path.join(self.repo, path))
+
+    def commit(self):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def found(self):
+        return fork_markers.check(self.repo, self.base, self.commit(), verbose=False)
+
+    def test_an_added_symlink_is_asked_for_the_manifest_not_for_a_marker(self):
+        self.link("WARP.md", "CLAUDE.md")
+        found = self.found()
+        self.assertEqual([u["file"] for u in found], ["WARP.md"])
+        self.assertEqual(found[0]["kind"], "not-commentable")
+        self.assertIn("symlink", found[0]["why"])
+        self.assertIn(fork_markers.MANIFEST, found[0]["why"])
+
+    def test_a_symlink_named_in_the_manifest_passes(self):
+        self.link("WARP.md", "CLAUDE.md")
+        self.put(fork_markers.MANIFEST, "- `WARP.md`: a link to CLAUDE.md, read by the Warp terminal\n")
+        self.assertEqual(self.found(), [])
+
+    def test_a_retargeted_symlink_is_asked_for_the_manifest_too(self):
+        self.link("WARP.md", "CLAUDE.md")
+        self.base = self.commit()
+        os.remove(os.path.join(self.repo, "WARP.md"))
+        self.link("WARP.md", "OTHER.md")
+        self.assertEqual([u["file"] for u in self.found()], ["WARP.md"])
+
+    def test_a_deleted_symlink_is_not_flagged(self):
+        self.link("WARP.md", "CLAUDE.md")
+        self.base = self.commit()
+        os.remove(os.path.join(self.repo, "WARP.md"))
+        self.assertEqual(self.found(), [])
+
+    def test_a_regular_markdown_file_is_still_checked_hunk_by_hunk(self):
+        self.put("WARP.md", "plain notes\n")
+        found = self.found()
+        self.assertEqual([(u["file"], u["kind"]) for u in found], [("WARP.md", "added")])
+
+
 class TestBinaryPaths(unittest.TestCase):
     def test_a_changed_file(self):
         self.assertEqual(fork_markers._binary_paths("Binary files a/x/y.png and b/x/y.png differ"), ("x/y.png", "x/y.png"))
