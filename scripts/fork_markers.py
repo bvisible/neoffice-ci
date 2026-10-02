@@ -22,7 +22,10 @@ that tag's `<` line: no comment can go between attributes, so the element is whe
 marker lives (neoffice-maintenance#354). A hunk made only of comment lines is a marker
 itself, never flagged — and in a Python file a docstring counts as a comment: it cannot
 carry a `#` marker, and the lines above it are more docstring, so no placement could ever
-satisfy the check (neoffice-maintenance#293). Files that cannot carry comments (JSON,
+satisfy the check (neoffice-maintenance#293). A file that is ours whole declares it with a
+`//// Neoffice — added file (no upstream equivalent)` header and needs no per-hunk marker: read
+in the first OWN_FILE_HEAD lines, or anywhere in the file when --upstream-base proves that the
+upstream tree lacks the file. Files that cannot carry comments (JSON,
 PO/MO, images, lockfiles, built assets, symlinks: a symlink holds a path, not text) are flagged unless
 NEOFFICE_FORK_MARKERS.md at HEAD names their path. A committed build artifact is skipped when the manifest names it (full
 path or glob) in the first column of a table headed `| Artifact |`. A binary file (an image,
@@ -449,6 +452,39 @@ def is_own_file(lines: list[str]) -> bool:
     return any(_OWN_FILE_RE.search(l) for l in lines[:OWN_FILE_HEAD])
 
 
+# The claim itself, owner right after the slashes: a marker that only MENTIONS an added file in its
+# prose is not a statement about the whole file.
+_CLAIM_RE = re.compile(r"////\s*(?:Neoffice|Neoservice)\s*[—–-]+\s*added file\b", re.IGNORECASE)
+
+
+def absent_from_upstream(repo: str, upstream_base: str | None, path: str) -> bool:
+    """True only when `upstream_base` is a commit we can read and `path` is not in its tree.
+
+    Any error answers False (no base, an unknown revision, git failing), so the file stays checked.
+    """
+    if not upstream_base:
+        return False
+    known = subprocess.run(["git", "rev-parse", "--verify", "-q", f"{upstream_base}^{{commit}}"], cwd=repo, capture_output=True)
+    if known.returncode != 0:
+        return False
+    listed = subprocess.run(["git", "ls-tree", "--name-only", upstream_base, "--", path], cwd=repo, capture_output=True, text=True)
+    return listed.returncode == 0 and not listed.stdout.strip()
+
+
+def is_own_file_verified(repo: str, upstream_base: str | None, path: str, lines: list[str]) -> bool:
+    """A file whose `added file` header sits below line OWN_FILE_HEAD, proved by the upstream instead.
+
+    The position rule above is a guess at where a header would be. In a Vue file that opens with a
+    doc comment, or a script that imports first, the header lands past line 12, and then a file that
+    is ours whole is asked for a marker on every hunk: 51 of them on one till editor on 2026-10-02,
+    one run red from 09:16, while the same run had already found the upstream base and could have
+    said the file is not there. With that base the claim is checked, not guessed: the header may
+    stand anywhere, provided the upstream tree really lacks the file. Without a base (or when the
+    file exists upstream, so the claim is wrong) nothing changes and the hunks stay checked.
+    """
+    return any(_CLAIM_RE.search(l) for l in lines) and absent_from_upstream(repo, upstream_base, path)
+
+
 def marker_nearby(lines: list[str], new_start: int, new_count: int) -> bool:
     lo = max(0, new_start - 1 - LOOKBACK)
     hi = min(len(lines), new_start - 1 + max(new_count, 1) + (LOOKBACK if new_count == 0 else 0))
@@ -570,7 +606,7 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
                 unmarked.append({"file": path, "kind": "not-commentable", "new_start": 0, "new_count": 0, "why": why, "snippet": []})
             continue
         lines = head_lines(head, path, repo)
-        if is_own_file(lines):
+        if is_own_file(lines) or is_own_file_verified(repo, upstream_base, path, lines):
             continue  # ours whole: the file header is the marker, per-hunk ones say nothing
         python = kind == "hash" and path.lower().endswith((".py", ".pyi"))
         tagged = ext_of(path) in TAGGED
@@ -665,7 +701,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check"); c.add_argument("--base", required=True); c.add_argument("--head", default="HEAD"); c.add_argument("--json"); c.add_argument("--repo", default="."); c.add_argument("--verbose", action="store_true")
-    c.add_argument("--upstream-base", help="upstream commit the fork is based on: files identical to it need no marker")
+    c.add_argument("--upstream-base", help="upstream commit the fork is based on: files identical to it need no marker, and a file it lacks may carry its `added file` header anywhere")
     v = sub.add_parser("verify"); v.add_argument("--base", required=True); v.add_argument("--repo", default="."); v.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     if a.cmd == "check":

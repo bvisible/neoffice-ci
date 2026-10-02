@@ -338,6 +338,76 @@ class TestAFileThatIsOursWholeNeedsNoPerHunkMarker(unittest.TestCase):
         self.assertFalse(fork_markers.is_own_file((deep + "\n# //// Neoffice — added file").splitlines()))
 
 
+class TestALateHeaderIsProvedByTheUpstream(unittest.TestCase):
+    """A header below line 12 excuses the file only when the upstream tree really lacks the file.
+
+    The position rule is a guess at where a header sits. A Vue file that opened with a doc comment
+    put its header on line 15, and the 51 hunks of a till editor kept a fork red for a day
+    (2026-10-02) although the same run had found the upstream base and the file was not in it.
+    """
+
+    HEAD = "".join(f"x{i} = {i}\n" for i in range(20))  # twenty lines before the header: past OWN_FILE_HEAD
+    CLAIM = "# //// Neoffice — added file (no upstream equivalent): our own module.\n"
+    # the changed line must sit more than LOOKBACK lines below the header, or the header would mark it
+    FILLER = "".join(f"f{i} = {i}\n" for i in range(10))
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        self.upstream = self.write("theirs.py", self.HEAD + "Y = 1\n")  # the upstream tree: one file of theirs
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, name, content):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(content)
+        self.git("add", name)
+        self.git("commit", "-q", "-m", "step")
+        return self.git("rev-parse", "HEAD")
+
+    def late(self, claim, value):
+        return self.HEAD + claim + self.FILLER + f"A = {value}\n"
+
+    def flagged(self, name, claim, upstream_base):
+        base = self.write(name, self.late(claim, 1))
+        head = self.write(name, self.late(claim, 2))
+        return fork_markers.check(self.repo, base, head, verbose=False, upstream_base=upstream_base)
+
+    def test_a_late_header_excuses_a_file_the_upstream_lacks(self):
+        self.assertEqual(self.flagged("mine.py", self.CLAIM, self.upstream), [])
+
+    def test_without_an_upstream_base_the_position_rule_is_all_there_is(self):
+        self.assertEqual(len(self.flagged("mine.py", self.CLAIM, None)), 1)
+
+    def test_a_file_the_upstream_has_is_not_excused_by_a_late_header(self):
+        # a wrong claim: theirs.py exists upstream, so its hunks keep needing their markers
+        base = self.write("theirs.py", self.HEAD + self.CLAIM + self.FILLER + "A = 1\n")
+        head = self.write("theirs.py", self.HEAD + self.CLAIM + self.FILLER + "A = 2\n")
+        self.assertEqual(len(fork_markers.check(self.repo, base, head, verbose=False, upstream_base=self.upstream)), 1)
+
+    def test_a_marker_that_only_mentions_an_added_file_is_not_a_claim(self):
+        prose = "# //// Neoffice — see the added file above for the reason.\n"
+        self.assertEqual(len(self.flagged("mine.py", prose, self.upstream)), 1)
+
+    def test_an_unknown_upstream_base_excuses_nothing(self):
+        self.assertEqual(len(self.flagged("mine.py", self.CLAIM, "deadbeef" * 5)), 1)
+
+    def test_a_header_at_the_top_still_needs_no_upstream_base(self):
+        base = self.write("mine.py", self.CLAIM + self.HEAD + self.FILLER + "A = 1\n")
+        head = self.write("mine.py", self.CLAIM + self.HEAD + self.FILLER + "A = 2\n")
+        self.assertEqual(fork_markers.check(self.repo, base, head, verbose=False), [])
+
+    def test_absent_from_upstream_answers_false_on_anything_it_cannot_prove(self):
+        self.assertTrue(fork_markers.absent_from_upstream(self.repo, self.upstream, "mine.py"))
+        self.assertFalse(fork_markers.absent_from_upstream(self.repo, self.upstream, "theirs.py"))
+        self.assertFalse(fork_markers.absent_from_upstream(self.repo, None, "mine.py"))
+        self.assertFalse(fork_markers.absent_from_upstream(self.repo, "", "mine.py"))
+        self.assertFalse(fork_markers.absent_from_upstream(self.repo, "not-a-revision", "mine.py"))
+
+
 class TestAMarkerOnTheElementCoversItsAttributes(unittest.TestCase):
     """Nothing can sit between the attributes of an opening tag: their marker goes on the element.
 
