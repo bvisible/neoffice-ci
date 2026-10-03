@@ -1,0 +1,39 @@
+name: Self tests
+# What this repository ships is read from `main` at run time by every app and fork of the fleet:
+# the reusable workflows through `uses: bvisible/neoffice-ci/...@main`, the scripts through curl.
+# A broken file here breaks them all at their next push. On 2026-09-10 a key declared twice in
+# frappe-app-ci.yml did, for two minutes, and nothing checked a push to this repository: no
+# workflow of its own ran on `push`, and the lone red run that day is all it left. This one does,
+# in about a minute.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: self-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  scripts:
+    name: Tests of the scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install what the scripts import
+        run: pip install polib
+      - name: Run every test of scripts/
+        run: python3 -m unittest discover -s scripts -p "test_*.py"
+  workflows:
+    name: Workflow files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint (version pinned)
+        run: curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz | tar -xz actionlint
+      - name: Lint the workflow files (structure, expressions and types, not the shell style)
+        run: ./actionlint -shellcheck= -pyflakes=
