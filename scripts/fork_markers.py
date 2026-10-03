@@ -565,20 +565,34 @@ def is_listed_artifact(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, p) for p in patterns)
 
 
-def manifest_names(manifest_text: str, path: str) -> bool:
-    """True when NEOFFICE_FORK_MARKERS.md names `path`, literally or by one of its backticked globs.
+_BUILD_HEADING = re.compile(r"\b(build|built|artifacts?|generated|compiled)\b", re.IGNORECASE)
+
+
+def manifest_lists_build_output(manifest: list[str], path: str) -> bool:
+    """True when the manifest lists `path` in a table under a heading that talks of build output.
 
     Only the tables headed `Artifact` or `Binary` excuse a path. A table headed `Path`, `File` or
     anything else is prose to the check, and the author, who sees the path listed, does not know why
     it is still asked for markers: that cost an investigation on mint (2026-09-22) and twice on raven
     (2026-09-30, 2026-10-02: 24 hash lines of the rebuilt entry point). This lets the report say so.
+
+    The heading is the discriminator. The same manifest names plain source files too, in its "what
+    the next merge will fight over" and "unreachable hunks" tables, and telling the author of a
+    template to rename a header there is noise (the wiki, 2026-10-03, the day after this hint
+    shipped on every path the manifest named).
     """
-    if path in manifest_text:
-        return True
-    return any(
-        "/" in pattern and fnmatch.fnmatchcase(path, pattern)
-        for pattern in re.findall(r"`([^`\s]+)`", manifest_text)
-    )
+    heading = ""
+    for line in manifest:
+        row = line.strip()
+        if row.startswith("#"):
+            heading = row
+            continue
+        if not row.startswith("|") or not _BUILD_HEADING.search(heading):
+            continue
+        first = row.strip("|").split("|")[0]
+        if any("/" in pattern and fnmatch.fnmatchcase(path, pattern) for pattern in re.findall(r"`([^`\s]+)`", first)):
+            return True
+    return False
 
 
 def same_as_upstream(repo: str, upstream_base: str, head: str, path: str) -> bool:
@@ -653,7 +667,7 @@ def check(repo: str, base: str, head: str, verbose: bool, upstream_base: str | N
                 "why": "no `////` marker in the hunk nor within %d lines above it" % LOOKBACK + (
                     f"; {MANIFEST} names this path: if it is committed build output, the table that lists it "
                     "must be headed `Artifact` (or `Binary`), the only words the check reads"
-                    if manifest_names(manifest_text, path)
+                    if manifest_lists_build_output(manifest, path)
                     else ""
                 ),
             })
