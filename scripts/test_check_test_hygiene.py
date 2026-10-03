@@ -143,9 +143,13 @@ class TestTheScan(unittest.TestCase):
 
 
 class TestTheExitCode(unittest.TestCase):
-    def run_main(self, text, *args):
+    def run_main(self, text, *args, github=False):
+        """Run main() on one file. The script prints annotations on GitHub and plain lines elsewhere, so
+        the format is chosen HERE: a test that inherited the runner's GITHUB_ACTIONS read the other
+        format than the one it asserted, and failed on the first CI this repository ever had."""
         import contextlib
         import io
+        from unittest import mock
 
         root = tempfile.mkdtemp()
         with open(os.path.join(root, "test_x.py"), "w") as handle:
@@ -154,7 +158,10 @@ class TestTheExitCode(unittest.TestCase):
         argv = sys.argv
         sys.argv = ["check_test_hygiene.py", "--root", root, *args]
         try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.dict(os.environ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                os.environ.pop("GITHUB_ACTIONS", None)
+                if github:
+                    os.environ["GITHUB_ACTIONS"] = "true"
                 code = hygiene.main()
         finally:
             sys.argv = argv
@@ -173,6 +180,14 @@ class TestTheExitCode(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("warning:", out)
         self.assertIn("1 warning(s)", out)
+
+    def test_on_github_the_findings_are_annotations_of_the_run(self):
+        code, out = self.run_main(self.SKIP, github=True)
+        self.assertEqual(code, 1)
+        self.assertIn("::error file=test_x.py,line=2::", out)
+        code, out = self.run_main(self.PATCH, github=True)
+        self.assertEqual(code, 0)
+        self.assertIn("::warning file=test_x.py,line=3::", out)
 
     def test_strict_makes_the_warning_an_error(self):
         code, _ = self.run_main(self.PATCH, "--strict")
