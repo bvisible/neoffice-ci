@@ -27,6 +27,11 @@ Design, on purpose:
   another app gives it, on every screen. The extractor re-emits such a bare msgid every night (a DocType
   label is read without context), so the night used to undo, each time, what the app had removed on
   purpose: it stays EMPTY, like the core's words, and a human's translation of it is never touched.
+- Never fills a bare msgid the app declares removed on purpose: `keep_empty.txt` next to the PO files,
+  one msgid per line (blank lines and `#` comments ignored). It covers what the rule above cannot see:
+  a word the app dropped altogether, with no contexted twin, because another app's word must win. The
+  extractor brings such a msgid back every night (a Select option is read without context) and, with
+  the account back, the night put it back each time, a commit that `[skip ci]` kept from any test.
 - Placeholders, format specifiers and HTML are preserved verbatim (the model is
   told, and we verify every returned string still carries them; a mismatch is
   dropped, never written).
@@ -242,6 +247,29 @@ def _left_to_its_context(entry: polib.POEntry, contexted: set[str]) -> bool:
     return not (entry.msgctxt or entry.msgid_plural) and entry.msgid in contexted
 
 
+KEEP_EMPTY_FILE = "keep_empty.txt"
+
+
+def _read_keep_empty(po_path: Path) -> set[str]:
+    """The bare msgids the app declares removed on purpose (see the design notes above). A file that is not
+    there declares nothing, and neither does one that cannot be read: the declaration is a help, never a
+    reason to stop a night."""
+    path = po_path.parent / KEEP_EMPTY_FILE
+    if not path.is_file():
+        return set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"  ! keep-empty: cannot read {path}: {e}", file=sys.stderr)
+        return set()
+    return {line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")}
+
+
+def _left_by_declaration(entry: polib.POEntry, declared: set[str]) -> bool:
+    """True for an empty bare msgid the app declares removed on purpose."""
+    return not (entry.msgctxt or entry.msgid_plural) and entry.msgid in declared
+
+
 def _parse_json_array(text: str) -> list[dict]:
     text = text.strip()
     # tolerate a ```json fence or leading prose
@@ -332,6 +360,10 @@ def main() -> int:
     contexted = {e.msgid for e in po if e.msgctxt and e.msgid and not e.obsolete}
     by_context = [e for e in todo if id(e) not in left_ids and _left_to_its_context(e, contexted)]
     left_ids |= {id(e) for e in by_context}
+    # And a bare msgid the app declares removed on purpose (keep_empty.txt).
+    declared = _read_keep_empty(Path(args.po_path))
+    by_declaration = [e for e in todo if id(e) not in left_ids and _left_by_declaration(e, declared)]
+    left_ids |= {id(e) for e in by_declaration}
     todo = [e for e in todo if id(e) not in left_ids]
     if left:
         print(f"{os.path.basename(args.po_path)}: {len(left)} untranslated msgid(s) left empty: the desk "
@@ -344,6 +376,11 @@ def main() -> int:
               "sense another app gives the word — "
               + ", ".join(repr(e.msgid) for e in by_context[:12])
               + (" …" if len(by_context) > 12 else ""))
+    if by_declaration:
+        print(f"{os.path.basename(args.po_path)}: {len(by_declaration)} untranslated bare msgid(s) left empty: "
+              f"the app declares them removed on purpose ({KEEP_EMPTY_FILE}) — "
+              + ", ".join(repr(e.msgid) for e in by_declaration[:12])
+              + (" …" if len(by_declaration) > 12 else ""))
     if not todo:
         print(f"{os.path.basename(args.po_path)}: 0 to translate — nothing to do")
         po.save(args.po_path)  # persist the Language header fix if any

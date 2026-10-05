@@ -588,5 +588,112 @@ class TestAWordTheAppSaysByContextIsNotReborn(unittest.TestCase):
         self.assertNotIn("through a context", output)
 
 
+class TestAnAppCanDeclareWhatItRemovedOnPurpose(unittest.TestCase):
+    """`keep_empty.txt` lists the bare msgids the night must never fill (the 2026-10-05 night, again).
+
+    The rule on contexted twins cannot see a word an app dropped altogether, with no twin, because another
+    app's word must win (« Counter », « light »): the extractor reads a Select option without a context
+    and brings the bare msgid back every night, and the night, its account back, filled it. The commit
+    carried `[skip ci]`, so the app's own test said so only at the next push, and would have each night.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.locale = Path(self._tmp.name) / "frappe-bench" / "apps" / "myapp" / "myapp" / "locale"
+        self.target = _po(
+            self.locale / "fr.po",
+            [
+                ("Counter", ""),
+                ("light", ""),
+                ("Brand new", ""),
+                ("Muted", "Silencieux"),  # a human's translation of a declared word: not ours to touch
+            ],
+        )
+
+    def _declare(self, text):
+        (self.locale / "keep_empty.txt").write_text(text, encoding="utf-8")
+
+    def _run(self, *extra):
+        asked = []
+
+        def model(command, **kwargs):
+            prompt = command[command.index("-p") + 1]
+            items = json.loads(prompt.split("Translate these items:\n", 1)[1])
+            asked.extend(item["s"] for item in items)
+            answer = json.dumps([{"i": item["i"], "t": "FR " + item["s"]} for item in items], ensure_ascii=False)
+            return _cli(stdout=json.dumps({"is_error": False, "result": answer}))
+
+        argv = ["translate_po.py", str(self.target), "--locale", "fr", *extra]
+        out = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(translate_po.subprocess, "run", side_effect=model):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = translate_po.main()
+        return code, out.getvalue(), asked
+
+    def _entries(self):
+        return {(e.msgid, e.msgctxt): e.msgstr for e in polib.pofile(str(self.target))}
+
+    def test_a_declared_bare_msgid_is_not_asked_and_stays_empty(self):
+        self._declare("Counter\nlight\n")
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("light", asked)
+        self.assertEqual(self._entries()[("Counter", None)], "")
+        self.assertEqual(self._entries()[("light", None)], "")
+        self.assertIn("removed on purpose", output)
+        self.assertIn("'Counter'", output)
+
+    def test_comments_and_blank_lines_declare_nothing(self):
+        _po(self.target, [("Counter", ""), ("light", ""), ("# of items", "")])
+        self._declare("# Counter is dropped on purpose\n# of items\n\n   \n  light  \n")
+        code, output, asked = self._run()
+        self.assertEqual(self._entries()[("light", None)], "", "surrounding space does not matter")
+        self.assertEqual(self._entries()[("Counter", None)], "FR Counter", "a commented word is not declared")
+        self.assertEqual(self._entries()[("# of items", None)], "FR # of items", "a line that starts with # is a comment")
+
+    def test_the_same_word_with_a_context_is_still_translated(self):
+        _po(self.target, [("Counter", "", "POS Opening")])  # no bare entry: the declaration is about the bare one
+        self._declare("Counter\n")
+        self._run()
+        self.assertEqual(self._entries()[("Counter", "POS Opening")], "FR Counter")
+
+    def test_a_human_translation_of_a_declared_word_is_never_touched(self):
+        self._declare("Muted\n")
+        self._run()
+        self.assertEqual(self._entries()[("Muted", None)], "Silencieux")
+
+    def test_what_is_not_declared_is_translated_as_before(self):
+        self._declare("Counter\n")
+        code, output, asked = self._run()
+        self.assertIn("Brand new", asked)
+        self.assertEqual(self._entries()[("Brand new", None)], "FR Brand new")
+
+    def test_without_the_file_nothing_is_declared(self):
+        code, output, asked = self._run()
+        self.assertEqual(self._entries()[("Counter", None)], "FR Counter")
+        self.assertNotIn("removed on purpose", output)
+
+    def test_a_file_that_cannot_be_read_declares_nothing_and_stops_nothing(self):
+        (self.locale / "keep_empty.txt").write_bytes(b"\xff\xfe not utf-8 \x80")
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertIn("cannot read", output)
+        self.assertEqual(self._entries()[("Counter", None)], "FR Counter")
+
+    def test_what_is_declared_does_not_count_against_the_cap(self):
+        self._declare("Counter\nlight\n")
+        code, output, asked = self._run("--max", "1")
+        self.assertEqual(asked, ["Brand new"], "the declared words come first in the file and take no slot")
+        self.assertEqual(self._entries()[("light", None)], "")
+
+    def test_a_word_declared_and_known_to_the_core_is_reported_once_as_the_cores(self):
+        _po(self.locale.parents[2] / "frappe" / "frappe" / "locale" / "fr.po", [("light", "léger")])
+        self._declare("light\n")
+        code, output, asked = self._run()
+        self.assertIn("'light' (frappe)", output)
+        self.assertNotIn("removed on purpose", output)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
