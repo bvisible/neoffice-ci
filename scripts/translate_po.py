@@ -21,6 +21,12 @@ Design, on purpose:
   and the core can correct it later without a stale copy here overriding the correction.
   Copying the core's word instead would freeze it. A msgid with a context is another key
   (`msgid:context`) and is translated as before.
+- Never fills a bare msgid this catalogue also carries WITH a context. An app that says its sense of a
+  word through a context (`word:context` is looked up before the bare word, so no other app can take
+  the sense) has chosen not to own the bare word: a bare entry of its own can only replace the sense
+  another app gives it, on every screen. The extractor re-emits such a bare msgid every night (a DocType
+  label is read without context), so the night used to undo, each time, what the app had removed on
+  purpose: it stays EMPTY, like the core's words, and a human's translation of it is never touched.
 - Placeholders, format specifiers and HTML are preserved verbatim (the model is
   told, and we verify every returned string still carries them; a mismatch is
   dropped, never written).
@@ -231,6 +237,11 @@ def _left_to_the_core(entry: polib.POEntry, vocabulary: dict[str, tuple[str, str
     return not (entry.msgctxt or entry.msgid_plural) and entry.msgid in vocabulary
 
 
+def _left_to_its_context(entry: polib.POEntry, contexted: set[str]) -> bool:
+    """True for an empty bare msgid this catalogue also carries with a context (see the design notes above)."""
+    return not (entry.msgctxt or entry.msgid_plural) and entry.msgid in contexted
+
+
 def _parse_json_array(text: str) -> list[dict]:
     text = text.strip()
     # tolerate a ```json fence or leading prose
@@ -316,12 +327,23 @@ def main() -> int:
     vocabulary, sources = core_vocabulary(args.po_path, args.locale)
     left = [e for e in todo if _left_to_the_core(e, vocabulary)]
     left_ids = {id(e) for e in left}
+    # So does a bare msgid this catalogue also carries with a context: the app says its sense through the
+    # context and a bare entry of its own would replace another app's sense of the word.
+    contexted = {e.msgid for e in po if e.msgctxt and e.msgid and not e.obsolete}
+    by_context = [e for e in todo if id(e) not in left_ids and _left_to_its_context(e, contexted)]
+    left_ids |= {id(e) for e in by_context}
+    todo = [e for e in todo if id(e) not in left_ids]
     if left:
-        todo = [e for e in todo if id(e) not in left_ids]
         print(f"{os.path.basename(args.po_path)}: {len(left)} untranslated msgid(s) left empty: the desk "
               f"already has their word from {', '.join(sources)} — "
               + ", ".join(f"{e.msgid!r} ({vocabulary[e.msgid][0]})" for e in left[:12])
               + (" …" if len(left) > 12 else ""))
+    if by_context:
+        print(f"{os.path.basename(args.po_path)}: {len(by_context)} untranslated bare msgid(s) left empty: "
+              "this app already says them through a context, and a bare entry of its own would replace the "
+              "sense another app gives the word — "
+              + ", ".join(repr(e.msgid) for e in by_context[:12])
+              + (" …" if len(by_context) > 12 else ""))
     if not todo:
         print(f"{os.path.basename(args.po_path)}: 0 to translate — nothing to do")
         po.save(args.po_path)  # persist the Language header fix if any

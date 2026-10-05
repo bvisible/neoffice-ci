@@ -490,5 +490,103 @@ class TestTheCoreSpeaksFirst(unittest.TestCase):
         self.assertNotIn("myapp", read)
 
 
+class TestAWordTheAppSaysByContextIsNotReborn(unittest.TestCase):
+    """A bare msgid this catalogue also carries WITH a context is left EMPTY, not translated.
+
+    An app whose catalogue says « Job » through a context (`Customer project`, a DocType name) removed the
+    bare « Job » on purpose: the bare entry of the app loaded last replaces every other app's sense of the
+    word, on every screen. The POT extractor reads a DocType label without a context, so the bare msgid
+    came back, empty, at each night's merge, and the night filled it. On 2026-10-05, the first night the
+    account could translate again after four days, it wrote « Poste » for it: one commit later the app's
+    own test (« fr.po still translates the bare 'Job' ») had turned its deployment branch red, and it
+    would have again every night.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.apps = Path(self._tmp.name) / "frappe-bench" / "apps"
+        _po(self.apps / "frappe" / "frappe" / "locale" / "fr.po", [("Save", "Enregistrer")])
+        self.target = _po(
+            self.apps / "myapp" / "myapp" / "locale" / "fr.po",
+            [
+                ("Job", ""),  # the bare msgid the extractor brings back
+                ("Job", "Projet", "Customer project"),  # our sense of it
+                ("Jobs", ""),
+                ("Jobs", "", "Field jobs"),  # our sense, not translated yet
+                ("Order", "Commande"),  # a human's bare translation: never touched
+                ("Order", "Ordre", "Sort"),
+                ("Brand new", ""),  # nothing carries it with a context
+            ],
+        )
+
+    def _run(self, *extra):
+        """(exit code, output, msgids the model was asked for) of one `main()` on the target file."""
+        asked = []
+
+        def model(command, **kwargs):
+            prompt = command[command.index("-p") + 1]
+            items = json.loads(prompt.split("Translate these items:\n", 1)[1])
+            asked.extend(item["s"] for item in items)
+            answer = json.dumps([{"i": item["i"], "t": "FR " + item["s"]} for item in items], ensure_ascii=False)
+            return _cli(stdout=json.dumps({"is_error": False, "result": answer}))
+
+        argv = ["translate_po.py", str(self.target), "--locale", "fr", *extra]
+        out = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(translate_po.subprocess, "run", side_effect=model):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = translate_po.main()
+        return code, out.getvalue(), asked
+
+    def _entries(self):
+        return {(e.msgid, e.msgctxt): e.msgstr for e in polib.pofile(str(self.target))}
+
+    def test_a_bare_msgid_with_a_contexted_twin_is_not_asked_and_stays_empty(self):
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("Job", asked)
+        self.assertEqual(self._entries()[("Job", None)], "")
+        self.assertIn("this app already says them through a context", output)
+        self.assertIn("'Job'", output)
+
+    def test_the_contexted_entry_itself_is_translated_as_before(self):
+        code, output, asked = self._run()
+        self.assertEqual(self._entries()[("Jobs", "Field jobs")], "FR Jobs")
+        self.assertEqual(self._entries()[("Jobs", None)], "", "its bare twin still stays empty")
+
+    def test_a_msgid_nothing_carries_with_a_context_is_translated_as_before(self):
+        code, output, asked = self._run()
+        self.assertIn("Brand new", asked)
+        self.assertEqual(self._entries()[("Brand new", None)], "FR Brand new")
+
+    def test_a_human_translation_of_a_bare_msgid_is_never_touched(self):
+        self._run()
+        self.assertEqual(self._entries()[("Order", None)], "Commande")
+        self.assertEqual(self._entries()[("Order", "Sort")], "Ordre")
+
+    def test_an_obsolete_contexted_entry_is_no_twin(self):
+        catalogue = polib.pofile(str(self.target))
+        catalogue.append(polib.POEntry(msgid="Stale", msgstr=""))
+        catalogue.append(polib.POEntry(msgid="Stale", msgstr="Périmé", msgctxt="Old", obsolete=True))
+        catalogue.save(str(self.target))
+        code, output, asked = self._run()
+        self.assertIn("Stale", asked)
+        self.assertEqual(self._entries()[("Stale", None)], "FR Stale")
+
+    def test_what_is_left_to_a_context_does_not_count_against_the_cap(self):
+        # In file order the bare « Job » and « Jobs » come first: were they counted, they would take the slot.
+        code, output, asked = self._run("--max", "1")
+        self.assertEqual(asked, ["Jobs"], "the first entry really asked is the contexted « Jobs »")
+        self.assertEqual(self._entries()[("Job", None)], "")
+        self.assertEqual(self._entries()[("Jobs", None)], "")
+
+    def test_a_word_the_core_also_has_is_reported_once_as_the_cores(self):
+        _po(self.target, [("Save", ""), ("Save", "Sauvegarder", "Draft")])
+        code, output, asked = self._run()
+        self.assertEqual(asked, [])
+        self.assertIn("'Save' (frappe)", output)
+        self.assertNotIn("through a context", output)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
