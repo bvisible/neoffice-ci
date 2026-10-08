@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless PO translator — fills empty msgstr with Sonnet, in CI.
+"""Headless PO translator — fills empty msgstr with Haiku, in CI.
 
 The manual half of the pipeline already exists (translate.sh does
 generate-pot-file / update-po-files / compile-po-to-mo; the /translate skill does
@@ -35,9 +35,9 @@ Design, on purpose:
 - Placeholders, format specifiers and HTML are preserved verbatim (the model is
   told, and we verify every returned string still carries them; a mismatch is
   dropped, never written).
-- The model is Sonnet, billed to the subscription via the `claude` CLI print
-  mode (CLAUDE_CODE_OAUTH_TOKEN) — cheap, and translation is volume not
-  reasoning (fleet rule: never a bigger model for translation).
+- The model is Haiku, billed to the subscription via the `claude` CLI print
+  mode (CLAUDE_CODE_OAUTH_TOKEN): translation is volume, not reasoning, and
+  Haiku 5.5 does it well for much less (fleet rule since 2026-10-08, Sonnet before).
 - Fixes the PO `Language:` header while here (an empty one kills `bench build`).
 
 Exit 0 whether or not anything changed, and after a partial failure; prints a
@@ -333,7 +333,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("po_path")
     ap.add_argument("--locale", default="fr")
-    ap.add_argument("--model", default=os.environ.get("TRANSLATE_MODEL", "claude-sonnet-5"))
+    ap.add_argument("--model", default=os.environ.get("TRANSLATE_MODEL", "claude-haiku-5-5"))
     ap.add_argument("--batch", type=int, default=40)
     ap.add_argument("--max", type=int, default=int(os.environ.get("TRANSLATE_MAX", "600")),
                     help="cap msgids translated per run (cost guard)")
