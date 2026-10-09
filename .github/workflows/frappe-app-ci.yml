@@ -367,6 +367,19 @@ jobs:
             ${{ runner.os }}-pip-${{ inputs.app }}-
             ${{ runner.os }}-pip-
 
+      - name: Retry helper (a registry that answers 5xx for a minute is not a verdict on our code)
+        # `bench init` and `bench get-app` download from GitHub, PyPI and the yarn registry. On 2026-10-09 the registry
+        # answered "502 Bad Gateway" to one `yarn install` and a push whose code nobody had broken went red, with its
+        # issue on the tracker. scripts/ci_retry.sh gives the downloading steps three attempts (a real error fails all
+        # three the same way and still fails the run). Fetched like the test hygiene check; if it cannot be fetched
+        # those steps simply run once, as they did before.
+        run: |
+          if ! curl -sfL --retry 3 --retry-delay 5 -o ~/ci_retry.sh \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/ci_retry.sh; then
+            echo "::warning::the retry helper could not be fetched: the steps that download will run once"
+            printf 'retry() { "$@"; }\n' > ~/ci_retry.sh
+          fi
+
       - name: Install MariaDB client and wkhtmltopdf (patched Qt build, as frappe's own CI)
         # The apt wkhtmltopdf is the unpatched-Qt build: it ignores frappe's switches and aborts
         # on the first asset it cannot fetch ("HostNotFoundError"); the wkhtmltox release build is
@@ -391,16 +404,24 @@ jobs:
 
       - name: Init bench (bvisible/frappe version-15 — the fleet's frappe)
         run: |
-          pip install frappe-bench
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
+          retry pip install frappe-bench
           FRAPPE_PATH=https://github.com/bvisible/frappe
           if [ "${{ inputs.upstream_preview }}" = "true" ]; then
             FRAPPE_PATH=https://github.com/frappe/frappe
             echo "UPSTREAM PREVIEW: frappe from $FRAPPE_PATH (erpnext from frappe/erpnext below)"
           fi
-          bench init --skip-redis-config-generation --skip-assets \
-            --frappe-path "$FRAPPE_PATH" \
-            --frappe-branch version-15 \
-            --python "$(which python)" ~/frappe-bench
+          # A failed attempt leaves a half-built bench: each attempt starts from nothing. `bench init` is the last
+          # command of the function because `set -e` is off inside a function that `retry` calls.
+          init_bench() {
+            rm -rf ~/frappe-bench
+            bench init --skip-redis-config-generation --skip-assets \
+              --frappe-path "$FRAPPE_PATH" \
+              --frappe-branch version-15 \
+              --python "$(which python)" ~/frappe-bench
+          }
+          retry init_bench
           # frappe's Dropbox integration still imports pkg_resources at install
           # time. Python 3.12 venvs ship without setuptools, and installing it
           # unpinned pulls 81.0.0 — the release that REMOVED pkg_resources — so
@@ -476,16 +497,25 @@ jobs:
           if [ -n "$FLEET_READ_TOKEN" ]; then
             AUTH="https://x-access-token:${FLEET_READ_TOKEN}@github.com/"
           fi
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
           IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
           for dep in "${DEPS[@]}"; do
             dep="$(echo "$dep" | xargs)"
             [ -z "$dep" ] && continue
+            # --overwrite: an attempt that died half way (yarn, pip) leaves apps/<dep>, and without the flag the next
+            # `bench get-app` would stop to ask whether to replace it.
             if [ "${{ inputs.upstream_preview }}" = "true" ] && [ "$dep" = "erpnext" ]; then
-              bench get-app erpnext https://github.com/frappe/erpnext --branch version-15
+              retry bench get-app erpnext https://github.com/frappe/erpnext --branch version-15 --overwrite
               continue
             fi
-            bench get-app "$dep" "${AUTH}bvisible/${dep//_/-}" --branch version-15 \
-              || bench get-app "$dep" "${AUTH}bvisible/${dep}" --branch version-15
+            # The repository is named with dashes or with underscores: both are tried inside ONE attempt, so the name
+            # that does not exist (an immediate 404) never costs a wait.
+            get_dep() {
+              bench get-app "$dep" "${AUTH}bvisible/${dep//_/-}" --branch version-15 --overwrite \
+                || bench get-app "$dep" "${AUTH}bvisible/${dep}" --branch version-15 --overwrite
+            }
+            retry get_dep
           done
         env:
           FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
@@ -493,16 +523,20 @@ jobs:
       - name: Get app under test
         working-directory: /home/runner/frappe-bench
         run: |
-          if [ "${{ inputs.skip_build }}" = "true" ]; then
-            bench get-app --skip-assets ${{ inputs.app }} "$GITHUB_WORKSPACE"
-          else
-            bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
-          fi
-          bench setup requirements --dev
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
+          get_app_under_test() {
+            if [ "${{ inputs.skip_build }}" = "true" ]; then
+              bench get-app --overwrite --skip-assets ${{ inputs.app }} "$GITHUB_WORKSPACE" && bench setup requirements --dev
+            else
+              bench get-app --overwrite ${{ inputs.app }} "$GITHUB_WORKSPACE" && bench setup requirements --dev
+            fi
+          }
+          retry get_app_under_test
           # Several fleet suites import pytest at module level (pytest-style
           # files next to unittest ones): without it in the env, frappe's
           # runner dies at collection with ModuleNotFoundError.
-          ~/frappe-bench/env/bin/pip install --quiet pytest
+          retry ~/frappe-bench/env/bin/pip install --quiet pytest
 
       - name: New site + install
         working-directory: /home/runner/frappe-bench
