@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       base:
-        description: "Older commit of the range (default: the push's `before`, else HEAD~1)"
+        description: "Older commit of the range (default: the last clean state, else the push's `before`, else HEAD~1); given, it wins over both"
         required: false
         type: string
         default: ""
@@ -71,10 +71,15 @@ jobs:
              || ! git cat-file -e "$BASE^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$BASE" "$HEAD" 2>/dev/null; then
             BASE=$(git rev-parse "$HEAD~1" 2>/dev/null || echo "$HEAD")   # first commit of a repo: nothing to compare
           fi
-          # the series, not the push (#293): from the last clean state when there is one
+          # the series, not the push (#293): from the last clean state when there is one -- unless a
+          # human gave the base. A marked temporary change (a diagnosis) moves the anchor onto itself,
+          # and its removal then reads as unmarked deletions; the way out is a run by hand from before
+          # it, and the anchor used to override that base too: the pass wrote 15 lines of markers on
+          # code back to upstream's (bvisible/frappe d4bd8d07, neoffice-maintenance#1762).
           git fetch -q origin '+refs/fork-markers/clean:refs/fork-markers/clean' 2>/dev/null || true
           ANCHOR=$(git rev-parse -q --verify refs/fork-markers/clean 2>/dev/null || true)
-          if [ -n "$ANCHOR" ] && [ "$ANCHOR" != "$HEAD" ] && git merge-base --is-ancestor "$ANCHOR" "$HEAD" 2>/dev/null; then
+          if [ -z "${{ inputs.base }}" ] && [ -n "$ANCHOR" ] && [ "$ANCHOR" != "$HEAD" ] \
+             && git merge-base --is-ancestor "$ANCHOR" "$HEAD" 2>/dev/null; then
             echo "anchor: last clean state ${ANCHOR:0:10} (refs/fork-markers/clean)"
             BASE="$ANCHOR"
           fi
