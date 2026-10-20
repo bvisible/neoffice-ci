@@ -14,6 +14,12 @@
 # dictionary, so this app's word would replace the core's on every screen (#619). List
 # the apps whose vocabulary the app must not override in `install_apps`.
 #
+# Words the app retired from its screens: `locale/glossary_<lang>.txt` next to the PO
+# files, one line `pattern<TAB>what to write instead` (Python regex, case-insensitive).
+# They go into the prompt as hard rules, and a translation that still uses one is left
+# empty and named in the log. This commit skips pre-commit and CI, so the app's own
+# check of its words must read the same file.
+#
 # Caller (in the app repo, .github/workflows/translate.yml):
 #   name: Translate
 #   on:

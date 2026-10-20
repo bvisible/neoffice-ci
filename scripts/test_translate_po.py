@@ -695,5 +695,156 @@ class TestAnAppCanDeclareWhatItRemovedOnPurpose(unittest.TestCase):
         self.assertNotIn("removed on purpose", output)
 
 
+GLOSSARY = (
+    "# Words this app retired from its screens.\n"
+    "\n"
+    "\\bvisites?\\b\tactivité, ou intervention pour un déplacement\n"
+    "\\bl['’]argent\\b\tla finance\n"  # noqa: RUF001 — the typographic apostrophe is what is searched
+    "\\bpassages?\\b\n"  # no replacement given: the word is still retired
+)
+
+
+class TestTheWordsAnAppRetiredAreNotWrittenAgain(unittest.TestCase):
+    """`glossary_<lang>.txt` lists the words an app retired: the model is told, and a translation using one is dropped.
+
+    An app that settled its vocabulary (one word per thing on screen) rewrote hundreds of translations and guards
+    them with a check of its own, in pre-commit and in CI. The night commits without pre-commit and with `[skip ci]`:
+    the first time a new string said "visit", it would have written « visite » again, and only the next human push
+    would have turned the app red.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.locale = Path(self._tmp.name) / "frappe-bench" / "apps" / "myapp" / "myapp" / "locale"
+        self.target = _po(
+            self.locale / "fr.po",
+            [
+                ("Book a visit", ""),
+                ("Follow the money", ""),
+                ("Brand new", ""),
+                ("Visit", "Visite"),  # a human's translation: the night never touches it, retired word or not
+            ],
+        )
+        self.answers = {
+            "Book a visit": "Planifier une visite",
+            "Follow the money": "Suivre l’argent",  # noqa: RUF001 — the typographic apostrophe the model writes
+            "Brand new": "Tout neuf",
+        }
+
+    def _declare(self, text, lang="fr"):
+        (self.locale / f"glossary_{lang}.txt").write_text(text, encoding="utf-8")
+
+    def _run(self, *extra):
+        """(exit code, output, prompts sent to the model) of one `main()` on the target file."""
+        prompts = []
+
+        def model(command, **kwargs):
+            prompt = command[command.index("-p") + 1]
+            prompts.append(prompt)
+            items = json.loads(prompt.split("Translate these items:\n", 1)[1])
+            answer = json.dumps([{"i": it["i"], "t": self.answers[it["s"]]} for it in items], ensure_ascii=False)
+            return _cli(stdout=json.dumps({"is_error": False, "result": answer}))
+
+        argv = ["translate_po.py", str(self.target), "--locale", "fr", *extra]
+        out = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(translate_po.subprocess, "run", side_effect=model):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = translate_po.main()
+        return code, out.getvalue(), prompts
+
+    def _entries(self):
+        return {(e.msgid, e.msgctxt): e.msgstr for e in polib.pofile(str(self.target))}
+
+    def test_the_prompt_carries_every_retired_word_and_its_replacement_as_rules(self):
+        self._declare(GLOSSARY)
+        code, output, prompts = self._run()
+        self.assertEqual(code, 0, output)
+        rules = prompts[0].split("Translate these items:\n", 1)[0]
+        self.assertIn("\\bvisites?\\b", rules)
+        self.assertIn("activité, ou intervention pour un déplacement", rules)
+        self.assertIn("\\bl['’]argent\\b", rules)  # noqa: RUF001
+        self.assertIn("la finance", rules)
+        self.assertIn("\\bpassages?\\b", rules)
+        self.assertNotIn("Words this app retired", rules, "a comment of the file is not a rule")
+        self.assertIn("3 retired word(s)", output)
+
+    def test_a_translation_with_a_retired_word_is_not_written_and_the_log_says_which(self):
+        self._declare(GLOSSARY)
+        code, output, _ = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._entries()[("Book a visit", None)], "")
+        self.assertEqual(self._entries()[("Follow the money", None)], "", "the typographic apostrophe is matched too")
+        self.assertIn("« visite »", output)
+        self.assertIn("'Book a visit'", output)
+        self.assertIn("activité, ou intervention pour un déplacement", output)
+        self.assertIn("« l’argent »", output)  # noqa: RUF001
+
+    def test_the_rest_of_the_batch_is_written(self):
+        self._declare(GLOSSARY)
+        self._run()
+        self.assertEqual(self._entries()[("Brand new", None)], "Tout neuf")
+
+    def test_the_match_ignores_case_and_follows_the_pattern(self):
+        self._declare(GLOSSARY)
+        self.answers["Book a visit"] = "Visite du chantier"
+        self.answers["Brand new"] = "Visiteur"  # `\bvisites?\b` is a whole word: a visitor is not a visit
+        self._run()
+        self.assertEqual(self._entries()[("Book a visit", None)], "")
+        self.assertEqual(self._entries()[("Brand new", None)], "Visiteur")
+
+    def test_a_human_translation_with_a_retired_word_is_never_touched(self):
+        self._declare(GLOSSARY)
+        self._run()
+        self.assertEqual(self._entries()[("Visit", None)], "Visite")
+
+    def test_without_the_file_there_is_no_rule_and_nothing_is_refused(self):
+        code, output, prompts = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("RETIRED", prompts[0])
+        self.assertEqual(self._entries()[("Book a visit", None)], "Planifier une visite")
+        self.assertNotIn("retired word", output)
+
+    def test_the_glossary_of_another_language_is_not_read(self):
+        self._declare(GLOSSARY, lang="de")
+        code, output, prompts = self._run()
+        self.assertNotIn("visites?", prompts[0])
+        self.assertEqual(self._entries()[("Book a visit", None)], "Planifier une visite")
+
+    def test_a_line_that_is_not_a_regular_expression_is_named_and_the_others_still_hold(self):
+        self._declare("(unclosed\twhatever\n" + GLOSSARY)
+        code, output, prompts = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertIn("glossary_fr.txt:1 is not a regular expression", output)
+        self.assertNotIn("(unclosed", prompts[0])
+        self.assertEqual(self._entries()[("Book a visit", None)], "")
+
+    def test_a_file_that_cannot_be_read_retires_nothing_and_stops_nothing(self):
+        (self.locale / "glossary_fr.txt").write_bytes(b"\xff\xfe not utf-8 \x80")
+        code, output, _ = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertIn("cannot read", output)
+        self.assertEqual(self._entries()[("Book a visit", None)], "Planifier une visite")
+
+    def test_translate_batch_alone_refuses_a_retired_word_like_a_placeholder_mismatch(self):
+        retired = translate_po.parse_glossary(GLOSSARY, "glossary_fr.txt")
+        sent = []
+
+        def model(prompt, model_name):
+            sent.append(prompt)
+            return _answer([(0, "Planifier une visite"), (1, "Bonjour"), (2, "Tout neuf")])
+
+        with patch.object(translate_po, "_claude", side_effect=model):
+            got = translate_po.translate_batch(["Book a visit", "Hello {0}", "Brand new"], "fr", "haiku", retired)
+        self.assertEqual(got, {2: "Tout neuf"})
+        self.assertIn("activité, ou intervention pour un déplacement", sent[0])
+
+    def test_translate_batch_without_a_glossary_asks_as_before(self):
+        with patch.object(translate_po, "_claude", return_value=_answer([(0, "Planifier une visite")])) as call:
+            got = translate_po.translate_batch(["Book a visit"], "fr", "haiku")
+        self.assertEqual(got, {0: "Planifier une visite"})
+        self.assertNotIn("RETIRED", call.call_args.args[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

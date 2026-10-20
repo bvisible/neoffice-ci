@@ -32,6 +32,13 @@ Design, on purpose:
   a word the app dropped altogether, with no contexted twin, because another app's word must win. The
   extractor brings such a msgid back every night (a Select option is read without context) and, with
   the account back, the night put it back each time, a commit that `[skip ci]` kept from any test.
+- Never writes a word the app retired: `glossary_<lang>.txt` next to the PO files, one line per word,
+  `pattern<TAB>what to write instead` (a Python regular expression, matched case-insensitively; the
+  replacement may be left out; blank lines and `#` comments ignored). The lines go into the prompt as hard
+  rules, and a translation that still matches one is dropped (left empty, like a placeholder mismatch) and
+  named in the log. An app that settled its vocabulary, one word per thing on screen, guards it with a check
+  of its own in pre-commit and CI; the night commits without either, so the first new string that said
+  "visit" would have brought the old word back. The app's own check reads the same file: one list.
 - Placeholders, format specifiers and HTML are preserved verbatim (the model is
   told, and we verify every returned string still carries them; a mismatch is
   dropped, never written).
@@ -60,6 +67,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import polib
 
@@ -270,6 +278,73 @@ def _left_by_declaration(entry: polib.POEntry, declared: set[str]) -> bool:
     return not (entry.msgctxt or entry.msgid_plural) and entry.msgid in declared
 
 
+# --- the words the app retired --------------------------------------------------------------------
+
+GLOSSARY_FILE = "glossary_{lang}.txt"
+
+
+class RetiredWord(NamedTuple):
+    pattern: str  # as the app wrote it, and as the model reads it
+    regex: re.Pattern
+    instead: str  # what to write instead; empty when the app did not say
+
+
+def parse_glossary(text: str, name: str) -> list[RetiredWord]:
+    """The retired words of one glossary file's text (see the design notes above). A line that is not a
+    regular expression is named and skipped: the others still hold."""
+    retired = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        pattern, _, instead = line.partition("\t")
+        pattern, instead = pattern.strip(), instead.strip()
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            print(f"  ! glossary: {name}:{number} is not a regular expression ({e}), skipped: {pattern!r}",
+                  file=sys.stderr)
+            continue
+        retired.append(RetiredWord(pattern, regex, instead))
+    return retired
+
+
+def read_glossary(po_path: Path, lang: str) -> list[RetiredWord]:
+    """The words the app retired for this language. A file that is not there retires nothing, and neither does
+    one that cannot be read: the glossary is a help, never a reason to stop a night."""
+    path = po_path.parent / GLOSSARY_FILE.format(lang=lang)
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"  ! glossary: cannot read {path}: {e}", file=sys.stderr)
+        return []
+    return parse_glossary(text, path.name)
+
+
+def _glossary_rules(retired: list[RetiredWord], lang_name: str) -> str:
+    """The prompt's paragraph that gives the model the retired words, or nothing without any."""
+    if not retired:
+        return ""
+    lines = "\n".join(
+        f"- {w.pattern}" + (f"  ->  write instead: {w.instead}" if w.instead else "") for w in retired
+    )
+    return (
+        f"\n\nThis app has RETIRED some {lang_name} words from its screens. A translation matching one of these "
+        "patterns (Python regular expressions, case-insensitive) is thrown away: never use these words, in any "
+        "form, and write what each line says instead:\n" + lines
+    )
+
+
+def _retired_in(text: str, retired: list[RetiredWord]) -> tuple[str, RetiredWord] | None:
+    """(the words matched, the rule) of the first retired word `text` uses, or None."""
+    for word in retired:
+        found = word.regex.search(text)
+        if found:
+            return found.group(0), word
+    return None
+
+
 def _parse_json_array(text: str) -> list[dict]:
     text = text.strip()
     # tolerate a ```json fence or leading prose
@@ -283,15 +358,23 @@ def _parse_json_array(text: str) -> list[dict]:
         return []
 
 
-def translate_batch(items: list[str], lang: str, model: str) -> dict[int, str]:
+def translate_batch(
+    items: list[str], lang: str, model: str, retired: list[RetiredWord] | None = None
+) -> dict[int, str]:
     """items -> {index: translation}, only for verified-safe translations.
+
+    `retired` are the words the app retired (`read_glossary`): the model is told, and a translation that
+    still uses one is dropped.
 
     Raises AccountLimitError or ClaudeCallError when the call itself failed (see `_claude`); a call that
     answered, with nothing safe to write, returns {}.
     """
+    retired = retired or []
+    lang_name = LANG_NAMES.get(lang, lang)
     numbered = [{"i": i, "s": s} for i, s in enumerate(items)]
     prompt = (
-        RULES.format(lang_name=LANG_NAMES.get(lang, lang))
+        RULES.format(lang_name=lang_name)
+        + _glossary_rules(retired, lang_name)
         + "\n\nTranslate these items:\n"
         + json.dumps(numbered, ensure_ascii=False)
     )
@@ -324,6 +407,13 @@ def translate_batch(items: list[str], lang: str, model: str) -> dict[int, str]:
         # run that finds a better word.
         if t.strip() == items[i].strip():
             print(f"  ~ dropped (identity, would veto other apps): {items[i]!r}", file=sys.stderr)
+            continue
+        # A word the app retired is left empty, like a lost placeholder: the next night asks again.
+        hit = _retired_in(t, retired)
+        if hit:
+            words, rule = hit
+            instead = f", write: {rule.instead}" if rule.instead else ""
+            print(f"  ~ dropped (retired word « {words} »{instead}): {items[i]!r} -> {t!r}", file=sys.stderr)
             continue
         result[i] = t
     return result
@@ -387,6 +477,11 @@ def main() -> int:
         return 0
 
     todo = todo[: args.max]
+    retired = read_glossary(Path(args.po_path), args.locale)
+    if retired:
+        print(f"{os.path.basename(args.po_path)}: {len(retired)} retired word(s) from "
+              f"{GLOSSARY_FILE.format(lang=args.locale)} given to the model as rules; a translation that uses "
+              "one is not written")
     filled = 0
     answered = 0  # calls that got an answer from the model, whatever was safe to write from it
     failed = 0  # calls that did not
@@ -394,7 +489,7 @@ def main() -> int:
     for start in range(0, len(todo), args.batch):
         chunk = todo[start : start + args.batch]
         try:
-            got = translate_batch([e.msgid for e in chunk], args.locale, args.model)
+            got = translate_batch([e.msgid for e in chunk], args.locale, args.model, retired)
         except AccountLimitError as e:
             # No later batch can work: stop at the first, keep what this file already holds (and the
             # Language header fix), and FAIL the run once, with the reason, instead of going green.
