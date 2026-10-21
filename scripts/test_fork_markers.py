@@ -1,5 +1,6 @@
 """fork_markers.py check, on a throwaway repository. Run: python3 -m unittest scripts/test_fork_markers.py"""
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -810,6 +811,151 @@ class TestBinaryPaths(unittest.TestCase):
     def test_a_name_that_holds_and(self):
         line = "Binary files a/cats and dogs.png and b/cats and dogs.png differ"
         self.assertEqual(fork_markers._binary_paths(line), ("cats and dogs.png", "cats and dogs.png"))
+
+
+class TestTheRuffTheForkPins(unittest.TestCase):
+    """fork_markers.py ruff-version (neoffice-maintenance#1797)."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+
+    def put(self, name, content):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(content)
+
+    def test_the_rev_of_the_ruff_pre_commit_block(self):
+        self.put(".pre-commit-config.yaml", (
+            "repos:\n"
+            "  - repo: https://github.com/pre-commit/pre-commit-hooks\n"
+            "    rev: v5.0.0\n"
+            "    hooks:\n"
+            "      - id: trailing-whitespace\n"
+            "  - repo: https://github.com/astral-sh/ruff-pre-commit\n"
+            "    rev: v0.13.2\n"
+            "    hooks:\n"
+            "      - id: ruff-format\n"
+        ))
+        self.assertEqual(fork_markers.ruff_version(self.repo), "0.13.2")
+
+    def test_an_exact_pin_in_pyproject_when_pre_commit_has_none(self):
+        self.put(".pre-commit-config.yaml", "repos:\n  - repo: https://github.com/psf/black\n    rev: 24.3.0\n")
+        self.put("pyproject.toml", '[project.optional-dependencies]\ndev = ["ruff==0.4.4", "pytest"]\n')
+        self.assertEqual(fork_markers.ruff_version(self.repo), "0.4.4")
+
+    def test_neoffice_ci_s_own_when_the_fork_pins_none(self):
+        self.assertEqual(fork_markers.ruff_version(self.repo), fork_markers.RUFF_DEFAULT)
+
+
+RUFF = os.environ.get("RUFF") or shutil.which("ruff")
+
+CLEAN = '''def unlock(user):
+    if not user:
+        return
+    forget(user)
+
+
+def lock(user):
+    return user
+'''
+
+# What the marker pass of 69f4d9f31 wrote on bvisible/suite: the closing marker at column 0, right
+# under the last line of the function.
+MARKED = CLEAN.replace("    forget(user)\n", "    forget(user)\n# //// Neoffice ▲▲▲\n")
+
+# A formatter that rewrites code, standing in for any change beyond the layout around the markers.
+CODE_REWRITER = """#!/bin/sh
+if [ "$2" = "--force-exclude" ] && [ "$3" = "--check" ]; then cat >/dev/null; exit 0; fi
+for last; do :; done
+sed 's/return user/return None/' "$last" > "$last.tmp" && mv "$last.tmp" "$last"
+"""
+
+
+@unittest.skipUnless(RUFF, "ruff is not installed (RUFF=/path/to/ruff, or on PATH)")
+class TestTheMarkersAreFormattedAsTheForkFormats(unittest.TestCase):
+    """fork_markers.py format (neoffice-maintenance#1797)."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def put(self, name, content):
+        with open(os.path.join(self.repo, name), "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def read(self, name):
+        with open(os.path.join(self.repo, name), encoding="utf-8") as f:
+            return f.read()
+
+    def base(self, content, name="events.py"):
+        self.put(name, content)
+        self.git("add", name)
+        self.git("commit", "-q", "-m", "base")
+        return self.git("rev-parse", "HEAD")
+
+    def ruff_is_happy(self, name):
+        return subprocess.run([RUFF, "format", "--check", name], cwd=self.repo, capture_output=True).returncode == 0
+
+    def test_a_closing_marker_under_a_function_gets_the_blank_lines_ruff_wants(self):
+        base = self.base(CLEAN)
+        self.put("events.py", MARKED)
+        self.assertFalse(self.ruff_is_happy("events.py"), "the case of 21.10: ruff refuses what the pass wrote")
+
+        done = fork_markers.format_python(self.repo, base, RUFF)
+
+        self.assertEqual(done["formatted"], ["events.py"])
+        self.assertTrue(self.ruff_is_happy("events.py"))
+        self.assertIn("    forget(user)\n\n\n# //// Neoffice ▲▲▲\n", self.read("events.py"))
+        self.assertEqual(fork_markers.verify(self.repo, base, verbose=False), [], "still comments and blank lines only")
+
+    def test_a_file_ruff_did_not_find_clean_before_the_pass_is_left_alone(self):
+        messy = CLEAN.replace("def lock(user):\n    return user\n", "def lock( user ):\n    return user\n")
+        base = self.base(messy)
+        marked = messy.replace("    forget(user)\n", "    forget(user)\n# //// Neoffice ▲▲▲\n")
+        self.put("events.py", marked)
+
+        done = fork_markers.format_python(self.repo, base, RUFF)
+
+        self.assertEqual(done["untouched"], ["events.py"])
+        self.assertEqual(self.read("events.py"), marked, "ruff would have rewritten code the pass never touched")
+
+    def test_a_file_the_pass_did_not_touch_is_not_formatted(self):
+        base = self.base(CLEAN)
+        self.put("other.py", "x = [ 1,2 ]\n")
+        self.git("add", "other.py")
+        self.git("commit", "-q", "-m", "other")
+        base = self.git("rev-parse", "HEAD")
+        self.put("events.py", MARKED)
+
+        fork_markers.format_python(self.repo, base, RUFF)
+
+        self.assertEqual(self.read("other.py"), "x = [ 1,2 ]\n")
+
+    def test_a_formatting_that_changes_code_is_put_back(self):
+        base = self.base(CLEAN)
+        self.put("events.py", MARKED)
+        fake = os.path.join(tempfile.mkdtemp(), "ruff")
+        with open(fake, "w") as f:
+            f.write(CODE_REWRITER)
+        os.chmod(fake, 0o755)
+
+        done = fork_markers.format_python(self.repo, base, fake)
+
+        self.assertEqual(done["kept"], ["events.py"])
+        self.assertEqual(self.read("events.py"), MARKED)
+
+    def test_no_ruff_at_that_path_leaves_the_pass_as_written(self):
+        base = self.base(CLEAN)
+        self.put("events.py", MARKED)
+
+        done = fork_markers.format_python(self.repo, base, os.path.join(self.repo, "no-such-ruff"))
+
+        self.assertEqual(done["untouched"], ["events.py"])
+        self.assertEqual(self.read("events.py"), MARKED)
 
 
 if __name__ == "__main__":

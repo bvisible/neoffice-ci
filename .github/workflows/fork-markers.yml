@@ -222,6 +222,22 @@ jobs:
               *.js|*.mjs|*.cjs) node --check "$f" || { echo "::error::$f no longer parses — discarded"; git checkout -- . && git clean -fd; exit 1; } ;;
             esac
           done
+          # The pass writes comments, but the fork's formatter still decides the blank lines around
+          # them: a closing marker at column 0 under a function body wants two blank lines for ruff
+          # format, and this commit skips CI, so only the fork's nightly linter saw it (bvisible/suite,
+          # 21.10, neoffice-maintenance#1797). The Python files the pass changed are formatted again
+          # with the ruff the fork pins, those ruff found clean before the pass only; a file whose code
+          # or comment text it would change is kept as the pass wrote it. If ruff cannot be had, the
+          # markers stay as written: this never costs the pass.
+          if [ -n "$(git diff --name-only -- '*.py' '*.pyi')" ]; then
+            RUFF_VERSION=$(python3 /tmp/fm/fork_markers.py ruff-version)
+            if python3 -m venv /tmp/fm/ruff && /tmp/fm/ruff/bin/pip install -q "ruff==$RUFF_VERSION"; then
+              python3 /tmp/fm/fork_markers.py format --base "${{ steps.range.outputs.head }}" --ruff /tmp/fm/ruff/bin/ruff \
+                || echo "::warning::the formatting of the markers failed: they stay where the pass wrote them"
+            else
+              echo "::warning::ruff $RUFF_VERSION could not be installed: the markers stay where the pass wrote them"
+            fi
+          fi
 
       - name: Commit and push the markers (neoffice-fork-bot, [skip ci])
         if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'

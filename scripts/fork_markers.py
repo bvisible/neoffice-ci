@@ -13,6 +13,14 @@ workflow of bvisible/neoffice-ci.
       Assert that the working tree differs from BASE by comments only (marker insertions):
       no removed line, every added line a comment or blank. NEOFFICE_FORK_MARKERS.md is
       free-form. Exit 1 otherwise. Run after the AI pass, before committing its work.
+  fork_markers.py ruff-version
+      The ruff the fork formats with: the `rev` of its astral-sh/ruff-pre-commit hook, else an
+      exact `ruff==X.Y.Z` in its pyproject.toml, else RUFF_DEFAULT.
+  fork_markers.py format --base SHA [--ruff PATH]
+      After the AI pass (and its verify): run `ruff format` on the Python files the pass changed,
+      only those ruff found clean at BASE, and keep the result only when it changes nothing but
+      blank lines and where comments stand. Never fails: a file it cannot vouch for is left as
+      the pass wrote it.
 
 A hunk counts as marked when one of its added lines carries `////`, or when the new file
 has a `////` line within LOOKBACK lines above the hunk (a marker placed just before the
@@ -732,13 +740,117 @@ def verify(repo: str, base: str, verbose: bool) -> list[str]:
     return problems
 
 
+# The marker pass writes comments, but the fork's formatter still decides the blank lines around
+# them: a closing marker written at column 0 right under a function body wants two blank lines for
+# ruff format. The marker commit skips CI, so only the fork's nightly linter saw it, red on a file
+# nobody had touched that day (bvisible/suite, 21.10, neoffice-maintenance#1797).
+RUFF_DEFAULT = "0.12.3"  # when the fork pins none: the version the suite fork formats with
+PYTHON_EXTS = (".py", ".pyi")
+_RUFF_REV = re.compile(r"""^\s*rev:\s*['"]?v?(\d+(?:\.\d+)*)['"]?\s*(#.*)?$""")
+_RUFF_PIN = re.compile(r"""['"]ruff==(\d+(?:\.\d+)*)['"]""")
+
+
+def ruff_version(repo: str) -> str:
+    """The ruff the fork formats with: the `rev` of the astral-sh/ruff-pre-commit block of its
+    .pre-commit-config.yaml, else an exact `ruff==X.Y.Z` in its pyproject.toml, else RUFF_DEFAULT."""
+    try:
+        config = pathlib.Path(repo, ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    except OSError:
+        config = ""
+    in_ruff = False
+    for line in config.splitlines():
+        if re.match(r"\s*-\s*repo:", line):
+            in_ruff = "astral-sh/ruff-pre-commit" in line
+        elif in_ruff:
+            m = _RUFF_REV.match(line)
+            if m:
+                return m.group(1)
+    try:
+        m = _RUFF_PIN.search(pathlib.Path(repo, "pyproject.toml").read_text(encoding="utf-8"))
+    except OSError:
+        m = None
+    return m.group(1) if m else RUFF_DEFAULT
+
+
+def _layout_free_shape(source: str) -> tuple[list[str], list[str]]:
+    """What a formatter may not change in a marked file: every code line, exactly (indentation
+    included), and the text of every comment line. Blank lines and the indentation of a comment
+    are the formatter's to decide."""
+    code, comments = [], []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            comments.append(stripped)
+        else:
+            code.append(line.rstrip())
+    return code, comments
+
+
+def format_python(repo: str, base: str, ruff: str = "ruff") -> dict[str, list[str]]:
+    """`ruff format` on the Python files the marker pass changed since BASE, where it changes only
+    the layout around the markers. A file ruff did not find clean at BASE is left alone (the
+    formatter would rewrite code the pass never touched); a file whose code lines or comment texts
+    it would change is put back as the pass wrote it. Returns what became of each file."""
+    done: dict[str, list[str]] = {"formatted": [], "kept": [], "untouched": []}
+    env = {**os.environ, "RUFF_NO_CACHE": "true"}  # no .ruff_cache left in the fork's tree
+    listed = subprocess.run(
+        ["git", "diff", "--name-only", "-z", "--no-renames", base, "--", *[f"*{e}" for e in PYTHON_EXTS]],
+        cwd=repo, capture_output=True,
+    )
+    for path in (p for p in listed.stdout.decode("utf-8", "replace").split("\0") if p):
+        before = subprocess.run(["git", "show", f"{base}:{path}"], cwd=repo, capture_output=True)
+        if before.returncode != 0:  # a file the pass added: nothing to compare with
+            done["untouched"].append(path)
+            continue
+        try:
+            check = subprocess.run(
+                [ruff, "format", "--force-exclude", "--check", "--stdin-filename", path, "-"],
+                cwd=repo, input=before.stdout, capture_output=True, env=env,
+            )
+        except OSError:  # no ruff at that path
+            check = None
+        if check is None or check.returncode != 0:  # not clean at BASE, or a ruff that cannot say
+            done["untouched"].append(path)
+            continue
+        file = pathlib.Path(repo, path)
+        written = file.read_bytes()
+        try:
+            subprocess.run([ruff, "format", "--force-exclude", "--quiet", path], cwd=repo, capture_output=True, check=True, env=env)
+            now = file.read_bytes()
+            if now == written:
+                continue
+            if _layout_free_shape(now.decode("utf-8", "replace")) != _layout_free_shape(written.decode("utf-8", "replace")):
+                file.write_bytes(written)
+                done["kept"].append(path)
+            else:
+                done["formatted"].append(path)
+        except Exception:
+            file.write_bytes(written)
+            done["kept"].append(path)
+    for state, paths in done.items():
+        for path in paths:
+            print(f"format: {state:9} {path}")
+    print(f"format: {len(done['formatted'])} file(s) formatted around their markers, {len(done['kept'])} kept as the pass wrote them")
+    return done
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check"); c.add_argument("--base", required=True); c.add_argument("--head", default="HEAD"); c.add_argument("--json"); c.add_argument("--repo", default="."); c.add_argument("--verbose", action="store_true")
     c.add_argument("--upstream-base", help="upstream commit the fork is based on: files identical to it need no marker, and a file it lacks may carry its `added file` header anywhere")
     v = sub.add_parser("verify"); v.add_argument("--base", required=True); v.add_argument("--repo", default="."); v.add_argument("--verbose", action="store_true")
+    r = sub.add_parser("ruff-version"); r.add_argument("--repo", default=".")
+    f = sub.add_parser("format"); f.add_argument("--base", required=True); f.add_argument("--repo", default="."); f.add_argument("--ruff", default="ruff")
     a = ap.parse_args()
+    if a.cmd == "ruff-version":
+        print(ruff_version(a.repo))
+        return 0
+    if a.cmd == "format":
+        format_python(a.repo, a.base, a.ruff)
+        return 0
     if a.cmd == "check":
         unmarked = check(a.repo, a.base, a.head, a.verbose, a.upstream_base)
         if a.json:

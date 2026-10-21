@@ -24,8 +24,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # ruff: fork_markers.py format runs the fork's formatter (its tests skip without it)
       - name: Install what the scripts import
-        run: pip install polib
+        run: pip install polib ruff==0.12.3
       - name: Run every test of scripts/
         run: python3 -m unittest discover -s scripts -p "test_*.py"
   workflows:
