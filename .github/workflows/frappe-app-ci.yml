@@ -429,8 +429,12 @@ jobs:
           # fleet's own envs.
           ~/frappe-bench/env/bin/pip install --quiet "setuptools<81"
           ~/frappe-bench/env/bin/python -c "import pkg_resources; print('pkg_resources OK')"
-          mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
-          mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
+          # The mariadb client apt installs now insists on TLS, and the mariadb:10.6 service container
+          # offers none: "ERROR 2026 (HY000): TLS/SSL error: SSL is required, but the server does not
+          # support it" killed this step on every app from 2026-10-30 18:22 UTC, before one test ran
+          # (neoffice-maintenance#2041). The container lives on the runner's own network, nothing to protect.
+          mariadb --skip-ssl --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
+          mariadb --skip-ssl --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
 
       # Upstream v15 lacks two things our fork adds to frappe's test package:
       # the v16 test base-class names (UnitTestCase / IntegrationTestCase) and the
