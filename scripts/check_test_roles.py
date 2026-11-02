@@ -73,8 +73,13 @@ OK_MARK = "role-check: ok"
 MIN_REASON = 10  # a reason, not "ok" or "n/a"
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist", ".tox", ".mypy_cache"}
 # A context manager or a helper whose name says it changes who acts.
-USER_CONTEXT = re.compile(r"(^|_)(as_role|as_user|set_user|run_as|acting_as|logged_in|login_as|impersonate|with_user)($|_)")
+# A context of a file of its own (`with _as(CASHIER):`) is also recognised by what it does, see Walker.context_user.
+ADMIN_CONTEXT = re.compile(r"(^|_)(administrator|admin|superuser)($|_)")
+USER_CONTEXT = re.compile(
+    r"^_?as$|^_?as_|(^|_)(set_user|run_as|acting_as|logged_in|signed_in|login|login_as|impersonate|with_user|session_of)($|_)"
+)
 # Patching one of these means the test creates no document: what it calls is not an act.
+ENTER_CONTEXT = {"enterContext", "enterClassContext", "enterModuleContext"}  # unittest: `with` for a whole test
 MOCKED_DOCUMENT = re.compile(r"(^|\.)frappe(\.(get_doc|new_doc|get_cached_doc))?$")
 # How far a call of a test is followed through the app. `place_order()` reaches its Sales Order in one or two; further
 # than that a catalogue feed reaches a Quotation because it asks for a price, and the check starts crying wolf.
@@ -92,7 +97,7 @@ class Act:
     ignored: bool = False  # ignore_permissions on this act
     via: str = ""  # the helper or the function of the app it went through
     allowed: bool = False  # `# role-check: ok <reason>` on its line
-    after_role: bool = False  # a real user had already acted: Administrator is no longer preparing anything
+    clock: int = 0  # when it happens in the test, to tell what a real user comes after
 
     def key(self) -> tuple[str, str, str]:
         return (self.doctype, self.verb, self.via)
@@ -104,8 +109,14 @@ class Summary:
 
     acts: list[Act] = field(default_factory=list)
     end_user: str | None = None  # who acts after it, None when it changes nothing
-    saw_role: bool = False  # a real user acted at some point
+    last_role: int = -1  # when a real user last acted, -1 when none ever does
+    clock: int = 0  # how long it lasts, for the caller's clock
+    changes_user: bool = False  # it sets the user, whether or not it gives it back
     mocked: bool = False  # it patches the creation of documents
+
+    @property
+    def saw_role(self) -> bool:
+        return self.last_role >= 0
 
 
 @dataclass
@@ -222,7 +233,8 @@ class Module:
             self._summaries[key] = Summary()  # stops recursion: a function that calls itself adds nothing
             walker = Walker(self, class_name, start_user)
             walker.block(func.body)
-            walker.result.end_user = walker.user if walker.user != start_user else None
+            is_context = any(_last_name(d) == "contextmanager" for d in func.decorator_list)
+            walker.result.end_user = walker.user if walker.user != start_user and not is_context else None
             walker.result.mocked = walker.result.mocked or _patches_documents(func)
             self._summaries[key] = walker.result
         return self._summaries[key]
@@ -287,11 +299,18 @@ class Walker:
         self.variables: dict[str, str] = {}
         self.ignored_variables: set[str] = set()
         self.result = Summary()
-        self.result.saw_role = start_user == "role"
+        self.result.last_role = 0 if start_user == "role" else -1
+
+    def tick(self) -> int:
+        self.result.clock += 1
+        return self.result.clock
 
     def set_user(self, user: str) -> None:
         self.user = user
-        self.result.saw_role = self.result.saw_role or user == "role"
+        self.result.changes_user = True
+        clock = self.tick()
+        if user == "role":
+            self.result.last_role = clock
 
     def block(self, statements: list[ast.stmt]) -> None:
         for statement in statements:
@@ -321,16 +340,43 @@ class Walker:
         saved = self.user
         for item in node.items:
             call = item.context_expr
-            target = call.func if isinstance(call, ast.Call) else call
-            if USER_CONTEXT.search(_last_name(target)):
-                user = self.module._user_of(call.args[0]) if isinstance(call, ast.Call) and call.args else "role"
+            user = self.context_user(call)
+            if user:
                 self.set_user(user)
             elif MOCKED_DOCUMENT.search(_patch_target(call) or ""):
                 self.result.mocked = True
             else:
                 self.calls_in(call)
         self.block(node.body)
-        self.user = saved
+        if self.user != saved:
+            self.set_user(saved)
+
+    def local_function(self, func: ast.AST) -> tuple[ast.AST, str | None] | None:
+        """The function of this file a call names."""
+        name = _last_name(func)
+        owner = _dotted(func.value) if isinstance(func, ast.Attribute) else ""
+        if owner in ("self", "cls"):
+            return self.module.method(self.class_name, name)
+        if not owner and name in self.module.functions:
+            return self.module.functions[name], None
+        return None
+
+    def context_user(self, call: ast.AST) -> str | None:
+        """Who acts inside `with <call>:`, None when it has nothing to do with users. Every file has its own context
+        (`_as`, `signed_in`, `as_customer`...): its name may say it, otherwise what it does does."""
+        target = call.func if isinstance(call, ast.Call) else call
+        name = _last_name(target)
+        named = self.module._user_of(call.args[0]) if isinstance(call, ast.Call) and call.args else "role"
+        if ADMIN_CONTEXT.search(name):
+            return "admin"
+        if USER_CONTEXT.search(name):
+            return named
+        found = self.local_function(target)
+        if found:
+            summary = self.module.summary(found[0], found[1])
+            if summary.changes_user:
+                return named if isinstance(call, ast.Call) and call.args else "role" if summary.saw_role else "admin"
+        return None
 
     def assignment(self, node: ast.Assign) -> None:
         self.calls_in(node.value)
@@ -345,6 +391,8 @@ class Walker:
             if doctype_of_dict:
                 self.variables[name + "#dict"] = doctype_of_dict
         target = node.targets[0]
+        if _dotted(target).endswith("session.user"):
+            self.set_user(self.module._user_of(node.value))
         # doc.flags.ignore_permissions = True
         if (
             isinstance(target, ast.Attribute)
@@ -390,6 +438,8 @@ class Walker:
         dotted = _dotted(node.func)
         if dotted.endswith("frappe.set_user") or dotted == "set_user":
             self.set_user(self.module._user_of(node.args[0]) if node.args else "role")
+        elif name in ENTER_CONTEXT and node.args and (user := self.context_user(node.args[0])):
+            self.set_user(user)
         elif name in SAVE_VERBS and isinstance(node.func, ast.Attribute):
             self.save_call(node, name)
         elif not self.local_call(node, name):
@@ -404,29 +454,32 @@ class Walker:
             self.add(node.lineno, doctype, verb, ignored=ignored)
 
     def add(self, line: int, doctype: str, verb: str, ignored: bool = False, via: str = "") -> None:
-        allowed = self.module.line_allows(line)
-        self.result.acts.append(Act(line, doctype, verb, self.user, ignored, via, allowed, self.result.saw_role))
+        clock = self.tick()
+        if self.user == "role":
+            self.result.last_role = clock
+        self.result.acts.append(Act(line, doctype, verb, self.user, ignored, via, self.module.line_allows(line), clock))
 
     def local_call(self, node: ast.Call, name: str) -> bool:
         """A function or a method of this file: its acts and the user it leaves behind are the caller's."""
-        owner = _dotted(node.func.value) if isinstance(node.func, ast.Attribute) else ""
-        if owner in ("self", "cls") and (found := self.module.method(self.class_name, name)):
-            func, class_name = found
-        elif not owner and name in self.module.functions:
-            func, class_name = self.module.functions[name], None
-        else:
+        found = self.local_function(node.func)
+        if not found:
             return False
-        summary = self.module.summary(func, class_name)
+        summary = self.module.summary(found[0], found[1])
         self.result.mocked = self.result.mocked or summary.mocked
-        before = self.result.saw_role
-        self.result.saw_role = before or summary.saw_role
+        start = self.result.clock
         for act in summary.acts:
             user = self.user if act.user == "caller" else act.user
             allowed = act.allowed or self.module.line_allows(node.lineno)
-            after_role = before or act.after_role
+            clock = start + act.clock
+            if user == "role":
+                self.result.last_role = max(self.result.last_role, clock)
             self.result.acts.append(
-                Act(node.lineno, act.doctype, act.verb, user, act.ignored, act.via or name, allowed, after_role)
+                Act(node.lineno, act.doctype, act.verb, user, act.ignored, act.via or name, allowed, clock)
             )
+        self.result.clock = start + summary.clock
+        if summary.saw_role:
+            self.result.last_role = max(self.result.last_role, start + summary.last_role)
+        self.result.changes_user = self.result.changes_user or summary.changes_user
         if summary.end_user:
             self.set_user(summary.end_user)
         return True
@@ -523,13 +576,13 @@ def judge(module: Module, class_name: str | None, func: ast.AST) -> TestReport:
     acts = summary.acts
     direct = [a for a in acts if a.verb != "calls"]
     judged = direct if summary.mocked else acts
-    # Administrator prepares and a real user then takes over: what comes before is the scenery. An act after the real
-    # user is one more act, and a test where nobody ever takes over has no scenery, only Administrator acting.
+    # Administrator prepares and a real user then takes over: what comes before a real user is the scenery. An act no
+    # real user comes after prepares nothing, and a test where nobody ever takes over has only Administrator acting.
     bad = [
         a
         for a in judged
         if not a.allowed
-        and ((a.user == "admin" and (a.after_role or not summary.saw_role)) or (a.user == "role" and a.ignored))
+        and ((a.user == "admin" and a.clock > summary.last_role) or (a.user == "role" and a.ignored))
     ]
     if bad:
         kind = "ignored" if all(a.ignored for a in bad) else "admin-act"

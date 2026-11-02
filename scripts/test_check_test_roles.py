@@ -122,6 +122,77 @@ class TheRule(unittest.TestCase):
         """)
         self.assertEqual(len(found), 1)
 
+    def test_a_context_of_the_file_is_recognised_by_what_it_does(self):
+        head = (
+            "import frappe\nfrom contextlib import contextmanager\n\n@contextmanager\ndef _for(user):\n"
+            "    frappe.set_user(user)\n    try:\n        yield\n    finally:\n"
+            '        frappe.set_user("Administrator")\n\nclass TestShop:\n'
+        )
+        self.assertEqual(roles.new_findings("test_x.py", source("""
+            def test_order(self):
+                with _for("seller@yopmail.com"):
+                    frappe.new_doc("Sales Order").insert()
+        """, head), None), [])
+
+    def test_a_context_named_for_a_person_is_a_real_act(self):
+        for context in ("_as", "as_cashier", "signed_in", "logged_in"):
+            self.assertEqual(refused(f"""
+                def test_order(self):
+                    with {context}("seller@yopmail.com"):
+                        frappe.new_doc("Sales Order").insert()
+            """), [], context)
+
+    def test_a_helper_with_a_context_on_a_parameter_is_a_real_act(self):
+        head = (
+            "import frappe\nfrom contextlib import contextmanager\nCASHIER = 'x@yopmail.com'\n\n@contextmanager\n"
+            "def _as(user):\n    frappe.set_user(user)\n    yield\n\nclass TestShop:\n"
+        )
+        self.assertEqual(roles.new_findings("test_x.py", source("""
+            def _record(self, user=CASHIER):
+                with _as(user):
+                    frappe.new_doc("Journal Entry").insert()
+
+            def test_order(self):
+                self._record()
+        """, head), None), [])
+
+    def test_enter_context_hands_a_whole_class_over(self):
+        self.assertEqual(refused("""
+            def setUp(self):
+                self.enterContext(as_role("sales_user"))
+
+            def test_order(self):
+                frappe.new_doc("Sales Order").insert()
+        """), [])
+
+    def test_a_session_set_by_hand_is_a_real_act(self):
+        self.assertEqual(refused("""
+            def test_order(self):
+                frappe.session.user = "seller@yopmail.com"
+                frappe.new_doc("Sales Order").insert()
+        """), [])
+
+    def test_the_scenery_may_come_between_two_steps_of_a_real_user(self):
+        self.assertEqual(refused("""
+            def test_order(self):
+                with as_role("portal_customer"):
+                    cart()
+                frappe.new_doc("Payment Entry").submit()
+                with as_role("portal_customer"):
+                    see_it_paid()
+        """), [])
+
+    def test_an_administrator_context_in_a_class_of_a_real_user_is_scenery(self):
+        self.assertEqual(refused("""
+            def setUp(self):
+                self.enterContext(as_role("sales_user"))
+
+            def test_order(self):
+                with as_administrator():
+                    frappe.new_doc("Sales Order").insert()
+                see_it()
+        """), [])
+
     def test_as_role_with_administrator_is_no_real_user(self):
         found = refused("""
             def test_order(self):
