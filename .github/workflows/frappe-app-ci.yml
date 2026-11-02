@@ -364,7 +364,8 @@ jobs:
           case "$BASE" in
             ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
           esac
-          if ! git fetch -q --depth=1 origin "$BASE"; then
+          # --deepen: a merge of upstream in the range is told by the parents of its commits, a shallow history has none.
+          if ! git fetch -q --depth=1 origin "$BASE" || ! git fetch -q --deepen=300 origin "$GITHUB_SHA"; then
             echo "::warning::the base $BASE could not be fetched: the role check is skipped"
             exit 0
           fi

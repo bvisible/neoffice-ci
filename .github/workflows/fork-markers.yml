@@ -39,6 +39,34 @@ on:
         required: false
 
 jobs:
+  test-roles:
+    # A new test does not act as Administrator (scripts/check_test_roles.py, neoffice-maintenance#2125). frappe-app-ci
+    # runs it too, but webshop and pos_next run their Tests at night and on a pull request: not on the push, which is
+    # how everything reaches them, and a night has no range to judge. This workflow is the one every fork runs on a
+    # push. A job of its own: a refused test has nothing to do with the markers, whose bot must still run.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    name: a new test does not act as Administrator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Read what this push adds
+        env:
+          BASE: ${{ github.event.before }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || { echo "the base is gone: skipped"; exit 0; }
+          if curl -sfL -o /tmp/check_test_roles.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_test_roles.py; then
+            python3 /tmp/check_test_roles.py --root . --base "$BASE"
+          else
+            echo "::warning::the role check could not be fetched: skipped"
+          fi
+
   markers:
     runs-on: ubuntu-latest
     permissions:

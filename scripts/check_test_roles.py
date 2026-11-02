@@ -16,6 +16,8 @@ an act that creates or submits a business document (BUSINESS_DOCTYPES) is played
   - A test that creates such a document and never hands over to anyone is refused.
   - `ignore_permissions=True` on the act of a real user is refused too: the check it skips is the one under test.
 
+A range that holds a merge is not judged: on a fork, a merge of upstream brings hundreds of tests of theirs.
+
 An act is what the test does itself, what a helper of the same file does, and what a function of the app does when
 the test calls it: `place_order()` is an act even if the test never names a Sales Order. A test that patches
 `frappe.get_doc` and its kind creates no document and is not judged on the functions it calls.
@@ -641,6 +643,12 @@ def git(root: str, *arguments: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
+def holds_a_merge(root: str, base: str) -> bool:
+    """A merge of upstream brings hundreds of tests of theirs, all as Administrator: they are not ours to judge, and
+    on a fork the check would turn every merge red. On our single branch a merge is never anything else."""
+    return bool((git(root, "rev-list", "--merges", f"{base}..HEAD") or "").strip())
+
+
 def is_test_file(path: str) -> bool:
     return os.path.basename(path).startswith("test_") and path.endswith(".py")
 
@@ -703,6 +711,10 @@ def main() -> int:
         base = args.base
     if not base:
         parser.error("say what a test is new against: --base <revision>, --staged, or files")
+
+    if not (args.files or args.staged) and holds_a_merge(root, base):
+        print("test roles: a merge in the range, upstream's tests are not judged")
+        return 0
 
     findings: list[Finding] = []
     relative = [os.path.relpath(os.path.abspath(path), root) for path in args.files if is_test_file(path)]

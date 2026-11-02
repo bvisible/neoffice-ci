@@ -461,6 +461,20 @@ class TheRepository(unittest.TestCase):
         self.git("commit", "-qm", "other")
         self.assertEqual(self.script("--base", "HEAD~1").returncode, 0)
 
+    def test_a_merge_of_upstream_is_not_judged(self):
+        self.git("checkout", "-q", "-b", "upstream")
+        self.write("test_theirs.py", 'import frappe\ndef test_theirs():\n    frappe.new_doc("Sales Order").insert()\n')
+        self.git("add", ".")
+        self.git("commit", "-qm", "theirs")
+        self.git("checkout", "-q", "-")
+        self.write("README", "ours")
+        self.git("add", ".")
+        self.git("commit", "-qm", "ours")
+        self.git("merge", "-q", "--no-edit", "upstream")
+        done = self.script("--base", "HEAD~1")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("merge", done.stdout)
+
     def test_staged(self):
         self.write("test_new.py", 'import frappe\ndef test_new():\n    frappe.new_doc("Sales Order").insert()\n')
         self.git("add", "test_new.py")
