@@ -29,5 +29,16 @@ Secrets expected from the caller: `CI_REPORT_SECRET` (report to the hub, which o
 closes the repo's `[CI]` issue in the fleet tracker) and `FLEET_READ_TOKEN` (read access
 to the private bvisible dependency repositories).
 
+The workflow refuses a new test that creates or submits a business document as Administrator
+(`scripts/check_test_roles.py`, the tool to act as a real role being `frappe/tests/roles.py` of the fork). The same
+check runs at commit time from `.pre-commit-config.yaml`:
+
+```yaml
+  - repo: https://github.com/bvisible/neoffice-ci
+    rev: main
+    hooks:
+      - id: check-test-roles
+```
+
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.

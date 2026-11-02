@@ -352,6 +352,29 @@ jobs:
             echo "::warning::the test hygiene check could not be fetched: skipped"
           fi
 
+      - name: A new test does not act as Administrator (static, seconds)
+        # Administrator is our account and no check ever refuses it: a test that plays the act under it says nothing
+        # about a real user (a customer who could no longer pay went through thousands of green tests, #2114). Only
+        # what this push adds is judged, so the suites that exist are not all red at once; the check says how to
+        # write the exception. See scripts/check_test_roles.py (and the tool: frappe/tests/roles.py of our fork).
+        # No base to compare with (a new branch, a nightly run), or a guard that cannot be fetched: it does not block.
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          if ! git fetch -q --depth=1 origin "$BASE"; then
+            echo "::warning::the base $BASE could not be fetched: the role check is skipped"
+            exit 0
+          fi
+          if curl -sfL -o /tmp/check_test_roles.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_test_roles.py; then
+            python3 /tmp/check_test_roles.py --root . --base "$BASE"
+          else
+            echo "::warning::the role check could not be fetched: skipped"
+          fi
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -455,6 +478,9 @@ jobs:
       # exactly that tail. If that ever stops being true — upstream edits the file,
       # or we start modifying instead of appending — it says so and carries
       # nothing, rather than pasting a mismatched block.
+      #
+      # A file of ours that upstream does not have at all travels whole, for the same reason: roles.py, the people a
+      # test acts as (neoffice-maintenance#2125), is imported by every app's tests.
       - name: Upstream preview — carry the tail our fork adds to frappe's tests
         if: ${{ inputs.upstream_preview == true }}
         env:
@@ -464,6 +490,7 @@ jobs:
           import os, sys, urllib.request
 
           FILES = ["frappe/tests/__init__.py", "frappe/tests/utils.py"]
+          ADDED = ["frappe/tests/roles.py"]
           bench = os.path.expanduser("~/frappe-bench/apps/frappe")
           token = os.environ.get("FLEET_READ_TOKEN", "")
 
@@ -493,6 +520,14 @@ jobs:
                   fh.write(tail)
               carried += len(tail)
               print(f"{rel}: carried {len(tail)} chars")
+          for rel in ADDED:
+              target = os.path.join(bench, rel)
+              if os.path.exists(target):
+                  print(f"::warning::{rel}: upstream has one now — not carried, look at both")
+                  continue
+              with open(target, "w", encoding="utf-8") as fh:
+                  carried += fh.write(ours(rel))
+              print(f"{rel}: carried whole")
           print(f"total carried onto upstream frappe: {carried} chars")
           PY
 

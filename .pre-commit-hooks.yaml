@@ -1,0 +1,7 @@
+- id: check-test-roles
+  name: a new test does not act as Administrator
+  description: A new test that creates or submits a business document as Administrator proves nothing about a real user.
+  entry: scripts/check_test_roles.py --base HEAD
+  language: script
+  files: (^|/)test_[^/]*\.py$
+  types: [python]
