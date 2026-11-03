@@ -779,6 +779,25 @@ jobs:
           done
           exit $rc
 
+      - name: JavaScript tests of the app (node --test, seconds)
+        # The suites under <app>/tests/js (the desk's search bar and spaces, the assistant's cards, forms of other apps:
+        # some 1 200 tests across the fleet) were run by no workflow: five of them stayed red after a change of the code
+        # they test, and nobody saw it (2026-11-03). They need no bench and run from the checkout, after the server tests
+        # so both verdicts are in the log; a red one fails the job, and the report below says so. An app without such a
+        # folder passes at once.
+        if: ${{ !cancelled() && !startsWith(inputs.test_args, '--debug-records') }}
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          shopt -s nullglob
+          files=("$APP"/tests/js/*.test.js)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no JavaScript tests under $APP/tests/js"
+            exit 0
+          fi
+          node --version
+          node --test "${files[@]}"
+
       - name: Report to the fleet tracker (via the hub)
         # success() || failure() and not always(): a cancelled run (superseded
         # by concurrency) must not report — it says nothing about the code.
