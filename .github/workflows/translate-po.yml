@@ -194,6 +194,11 @@ jobs:
           git config user.email "dev@neoffice.io"
           # Only the .po carries the translations; the compiled .mo is gitignored.
           git add '**/locale/*.po' 2>/dev/null || git add .
+          # A PO whose only change is its header date (generate-pot-file restamps it every night) holds no
+          # translation: left out, or every app got one empty commit a night (neoffice-maintenance#2179).
+          curl -fsSL -o /tmp/drop_header_only_po_changes.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/drop_header_only_po_changes.py
+          python3 /tmp/drop_header_only_po_changes.py
           if git diff --cached --quiet; then
             echo "no new translations — nothing to commit"
             exit 0
