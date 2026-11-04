@@ -789,7 +789,7 @@ def moved_methods(
 
 def python_files(root: str) -> Iterator[str]:
     for folder, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))  # a worktree is no code of the app
         for name in sorted(files):
             if name.endswith(".py"):
                 yield os.path.join(folder, name)

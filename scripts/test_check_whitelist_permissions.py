@@ -1177,6 +1177,11 @@ class TheRepository(unittest.TestCase):
         done = self.script("--base", "HEAD~1")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
+    def test_the_inventory_leaves_out_hidden_folders(self):
+        self.write(".claude/worktrees/copy/shop/old.py", self.OLD)
+        rows = json.loads(self.script("--inventory", "--json").stdout)
+        self.assertEqual([row["file"] for row in rows], ["shop/old.py"])
+
     def test_the_inventory_gives_the_filters(self):
         self.write(
             "shop/new.py",
