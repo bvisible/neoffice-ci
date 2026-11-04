@@ -73,6 +73,11 @@ on:
         required: false
         type: string
         default: "22"
+      tests_timeout_minutes:
+        description: "Ceiling of the build + tests job. 45 fits most apps; an app whose whole suite runs longer asks for more (pos_next: about 25 minutes of tests on a quick runner, over 41 on a slow one, cancelled at 45 on 2026-11-04)."
+        required: false
+        type: number
+        default: 45
       parallel_runner:
         description: >-
           Run the suite with `bench run-parallel-tests --total-builds 1` instead of `run-tests --app`.
@@ -308,7 +313,7 @@ jobs:
     # nightly silently would be worse than the minutes it saves.
     if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.tests_timeout_minutes }}
     name: build + tests (${{ inputs.app }})
 
     services:
