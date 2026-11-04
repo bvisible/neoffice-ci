@@ -536,7 +536,7 @@ class Tree:
         self.controls: dict[tuple[ast.AST, int], str] = {}
 
     def adopt(self, path: str, text: str) -> Source | None:
-        if path not in self.sources:
+        if self.sources.get(path) is None:
             try:
                 self.sources[path] = Source(text, *_module_of(path))
             except (SyntaxError, ValueError):
@@ -544,12 +544,20 @@ class Tree:
         return self.sources[path]
 
     def source(self, module: str) -> Source | None:
-        """By path, not by module: `x.py` and `x/__init__.py` can stand side by side, and Python imports the package."""
+        """By path, not by module: `x.py` and `x/__init__.py` can stand side by side, and Python imports the package.
+        What is not there is remembered too: in the CI a read is a `git show`, and a file of the theme names frappe
+        thousands of times. Nothing of another app is in this repository, its package alone says so."""
         parts = module.split(".")
+        if len(parts) > 1 and self.source(parts[0]) is None:
+            return None
         for path in (os.path.join(*parts, "__init__.py"), os.path.join(*parts) + ".py"):
-            text = self.read(path) if path not in self.sources else ""
-            if text is not None:
-                return self.adopt(path, text)
+            if path not in self.sources:
+                text = self.read(path)
+                self.sources[path] = None
+                if text is not None:
+                    self.adopt(path, text)
+            if self.sources[path] is not None:
+                return self.sources[path]
         return None
 
     def resolve(self, node: ast.AST, source: Source, chain: int = 0) -> tuple[ast.AST, Source] | None:

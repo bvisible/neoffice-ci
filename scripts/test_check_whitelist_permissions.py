@@ -466,6 +466,19 @@ class TheOtherFiles(unittest.TestCase):
             **{"app/sub/__init__.py": "from app.permitted import require_staff\n"},
         ), [])
 
+    def test_a_file_that_is_not_there_is_asked_once(self):
+        asked = []
+
+        def read(path):
+            asked.append(path)
+            return None
+
+        calls = "\n".join(f"    frappe.utils.helper_{n}()" for n in range(50))
+        text = f"import frappe\n\n@frappe.whitelist()\ndef read_note():\n{calls}\n"
+        check.new_findings("app/api.py", text, None, now=check.Tree(read))
+        self.assertEqual(len(asked), len(set(asked)))
+        self.assertLessEqual(len(asked), 2)
+
     def test_a_module_out_of_the_app_is_no_check(self):
         self.assertEqual(len(self.judged(
             "import frappe\nfrom erpnext.stock import require_staff\n\n"
