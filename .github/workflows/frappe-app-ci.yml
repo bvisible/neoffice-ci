@@ -619,6 +619,66 @@ jobs:
           done
           bench --site test_site install-app ${{ inputs.app }}
 
+      - name: Serve exchange rates locally (the tests never wait for a rate provider)
+        # erpnext.setup.utils.get_exchange_rate asks Currency Exchange Settings' provider (frankfurter)
+        # for any pair no Currency Exchange record gives, with a 10 s timeout. The test site has no
+        # record, so every test that needs a pair went to the internet: when the provider was slow
+        # or down (4.11.2026, maintenance#2225), each such test lost 20 s, a test that times its call
+        # went red (neoffice_theme test_scan_link_lock_wait), a test that needs a rate got none
+        # (webshop test_exact_match_with_price, "Missing Currency Exchange Rates for INR-USD"), and the
+        # opening invoices of erpnext's tests failed on something else than what they assert. A rate
+        # from the network is no more a fact about our code than one from here: a local provider
+        # answers fixed, plausible rates (never 1 between two currencies), in the provider's own
+        # format. A test that writes its own Currency Exchange still reads it first.
+        if: inputs.app == 'erpnext' || contains(inputs.install_apps, 'erpnext')
+        working-directory: /home/runner/frappe-bench/sites
+        run: |
+          nohup python3 - >/dev/null 2>&1 <<'PY' &
+          import http.server, json, socketserver, urllib.parse
+          # Units of each currency for one US dollar; any other currency counts as one dollar.
+          PER_USD = {"USD": 1.0, "EUR": 0.92, "CHF": 0.88, "GBP": 0.79, "INR": 83.0, "PKR": 280.0,
+                     "JPY": 150.0, "CAD": 1.36, "AUD": 1.52, "CNY": 7.2, "SEK": 10.5, "NOK": 10.8, "DKK": 6.9}
+          class H(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.0"
+              def do_GET(self):
+                  url = urllib.parse.urlsplit(self.path)
+                  query = urllib.parse.parse_qs(url.query)
+                  base = (query.get("base") or ["USD"])[0]
+                  target = (query.get("symbols") or ["USD"])[0]
+                  rate = round(PER_USD.get(target, 1.0) / PER_USD.get(base, 1.0), 6)
+                  body = json.dumps({"amount": 1.0, "base": base, "date": url.path.strip("/"), "rates": {target: rate}}).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+              def log_message(self, *a):
+                  pass
+          socketserver.TCPServer.allow_reuse_address = True
+          socketserver.TCPServer(("127.0.0.1", 8001), H).serve_forever()
+          PY
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null "http://127.0.0.1:8001/2026-01-01?base=USD&symbols=INR" && break
+            sleep 0.5
+          done
+          ../env/bin/python - <<'PY'
+          import frappe
+          frappe.init(site="test_site", sites_path=".")
+          frappe.connect()
+          frappe.set_user("Administrator")
+          settings = frappe.get_single("Currency Exchange Settings")
+          settings.service_provider = "Custom"
+          settings.api_endpoint = "http://127.0.0.1:8001/{transaction_date}"
+          settings.set("req_params", [{"key": "base", "value": "{from_currency}"}, {"key": "symbols", "value": "{to_currency}"}])
+          settings.set("result_key", [{"key": "rates"}, {"key": "{to_currency}"}])
+          settings.save()
+          frappe.db.commit()
+          from erpnext.setup.utils import get_exchange_rate
+          rate = get_exchange_rate("USD", "INR")
+          print("exchange rates served on 127.0.0.1:8001, USD to INR:", rate)
+          assert abs(rate - 83.0) < 1e-6, rate
+          PY
+
       - name: Bootstrap erpnext test data
         if: contains(inputs.install_apps, 'erpnext') && inputs.erpnext_bootstrap
         working-directory: /home/runner/frappe-bench
