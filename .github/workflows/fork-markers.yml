@@ -67,6 +67,32 @@ jobs:
             echo "::warning::the role check could not be fetched: skipped"
           fi
 
+  whitelist-permissions:
+    # A new or changed web method holds a permission check (scripts/check_whitelist_permissions.py, #2261). Here for the
+    # same reason as the job above: some forks run their Tests at night and on a pull request, never on the push.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    name: a new web method asks for a right
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Read what this push adds
+        env:
+          BASE: ${{ github.event.before }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || { echo "the base is gone: skipped"; exit 0; }
+          if curl -sfL -o /tmp/check_whitelist_permissions.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_whitelist_permissions.py; then
+            python3 /tmp/check_whitelist_permissions.py --root . --base "$BASE"
+          else
+            echo "::warning::the permission check could not be fetched: skipped"
+          fi
+
   markers:
     runs-on: ubuntu-latest
     permissions:

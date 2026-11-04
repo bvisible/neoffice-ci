@@ -40,5 +40,14 @@ check runs at commit time from `.pre-commit-config.yaml`:
       - id: check-test-roles
 ```
 
+The workflow also refuses a new or changed `@frappe.whitelist` method that holds no permission check, a new
+`allow_guest=True` that does not say why, and a parameter with no annotation that reaches a query as a filter
+(`scripts/check_whitelist_permissions.py`; its docstring gives the rule and how to write a reason). The stock blocks
+nobody until someone touches it. At commit time, in `.pre-commit-config.yaml`:
+
+```yaml
+      - id: check-whitelist-permissions
+```
+
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.

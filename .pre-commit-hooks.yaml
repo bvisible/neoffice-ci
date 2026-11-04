@@ -5,3 +5,9 @@
   language: script
   files: (^|/)test_[^/]*\.py$
   types: [python]
+- id: check-whitelist-permissions
+  name: a new web method asks for a right
+  description: A new or changed @frappe.whitelist method holds a permission check, or says why it needs none.
+  entry: scripts/check_whitelist_permissions.py --base HEAD
+  language: script
+  types: [python]

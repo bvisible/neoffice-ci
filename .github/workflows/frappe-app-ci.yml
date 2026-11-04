@@ -217,6 +217,41 @@ jobs:
               fh.write(f"## semgrep — what this app owes\n\n{out}\n")
           PY
 
+  # `@frappe.whitelist()` opens a function to every signed-in account, a portal customer included, and checks nothing
+  # else: an audit of one app confirmed some thirty defects of that one shape (#2261). An audit is too dear to run on
+  # every development, this costs seconds. Only the methods this push adds or changes are judged, so the stock blocks
+  # nobody until someone touches it, and the check says how to write a reason. A job of its own, and not a step of the
+  # tests: a refused method says nothing about them, and the run should still give their verdict. No base to compare
+  # with (a new branch, a nightly run), or a guard that cannot be fetched: it does not block.
+  # See scripts/check_whitelist_permissions.py.
+  whitelist-permissions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    name: a new web method asks for a right (${{ inputs.app }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.app_ref || github.sha }}
+
+      - name: Read what this push adds
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          # --deepen: a merge of upstream in the range is told by the parents of its commits, a shallow history has none.
+          if ! git fetch -q --depth=1 origin "$BASE" || ! git fetch -q --deepen=300 origin "$GITHUB_SHA"; then
+            echo "::warning::the base $BASE could not be fetched: the permission check is skipped"
+            exit 0
+          fi
+          if curl -sfL -o /tmp/check_whitelist_permissions.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_whitelist_permissions.py; then
+            python3 /tmp/check_whitelist_permissions.py --root . --base "$BASE"
+          else
+            echo "::warning::the permission check could not be fetched: skipped"
+          fi
+
   # A nightly on an app nobody touched proves nothing and costs ~12 minutes of the
   # account's Actions allowance. This gate asks the hub what was last proven green
   # and skips the heavy job when the tree has not moved since. It asks the HUB and
