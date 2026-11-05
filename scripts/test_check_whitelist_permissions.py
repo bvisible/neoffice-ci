@@ -638,7 +638,7 @@ class TheReasons(unittest.TestCase):
 class WhatIsTouched(unittest.TestCase):
     OLD = """
         @frappe.whitelist()
-        def read_note(name):
+        def read_note(name: str):
             return frappe.get_doc("Note", name)
     """
 
@@ -656,7 +656,7 @@ class WhatIsTouched(unittest.TestCase):
     def test_a_changed_body_is_judged(self):
         after = """
             @frappe.whitelist()
-            def read_note(name):
+            def read_note(name: str):
                 return frappe.get_doc("Note", name).as_dict()
         """
         self.assertEqual(len(refused(after, self.OLD)), 1)
@@ -664,14 +664,14 @@ class WhatIsTouched(unittest.TestCase):
     def test_a_changed_signature_is_judged(self):
         after = """
             @frappe.whitelist()
-            def read_note(name, extra=None):
+            def read_note(name: str, extra=None):
                 return frappe.get_doc("Note", name)
         """
         self.assertEqual(len(refused(after, self.OLD)), 1)
 
     def test_a_function_that_becomes_a_web_method_is_judged(self):
         before = """
-            def read_note(name):
+            def read_note(name: str):
                 return frappe.get_doc("Note", name)
         """
         self.assertEqual(len(refused(self.OLD, before)), 1)
@@ -679,7 +679,7 @@ class WhatIsTouched(unittest.TestCase):
     def test_a_comment_changes_nothing(self):
         after = """
             @frappe.whitelist()
-            def read_note(name):
+            def read_note(name: str):
                 # the note, whole
                 return frappe.get_doc("Note", name)
         """
@@ -688,7 +688,7 @@ class WhatIsTouched(unittest.TestCase):
     def test_a_docstring_changes_nothing(self):
         after = '''
             @frappe.whitelist()
-            def read_note(name):
+            def read_note(name: str):
                 """The note, whole."""
                 return frappe.get_doc("Note", name)
         '''
@@ -698,7 +698,7 @@ class WhatIsTouched(unittest.TestCase):
         after = """
             @frappe.whitelist()
             def read_note(
-                name,
+                name: str,
             ):
                 return frappe.get_doc(
                     "Note",
@@ -709,7 +709,7 @@ class WhatIsTouched(unittest.TestCase):
 
     def test_a_method_no_longer_exposed_is_not_judged(self):
         after = """
-            def read_note(name):
+            def read_note(name: str):
                 return frappe.get_doc("Note", name)
         """
         self.assertEqual(refused(after, self.OLD), [])
@@ -768,6 +768,11 @@ class TheFilters(unittest.TestCase):
             'frappe.db.get_values("Note", name, "title")',
             'frappe.db.exists("Note", name)',
             'frappe.db.exists("Note", dn=name)',
+            'frappe.get_doc("Note", name)',
+            'frappe.get_cached_doc("Note", name)',
+            'frappe.db.set_value("Note", name, "archived", 1)',
+            'frappe.delete_doc("Note", name)',
+            'frappe.db.delete("Note", name)',
             "frappe.db.exists(name)",
             'frappe.get_all("Note", filters=name)',
             'frappe.get_all("Note", or_filters=name)',

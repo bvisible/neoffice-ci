@@ -21,8 +21,9 @@ The rule, for a method that is NEW or CHANGED (the stock blocks nobody until som
     imports. Refusing guests alone does not count, a signed-in account passes. Neither does a `has_permission` whose
     answer nobody reads, nor a `get_list` or a save with `ignore_permissions`.
   - A new `allow_guest=True` always says why, even if it holds a check: it is a public door.
-  - A parameter with no annotation does not reach `frappe.db.get_value`, `frappe.db.exists` or `frappe.get_all` as a
-    filter: a JSON body turns it into a list or a dict, which is to say an operator or a filter of the caller's choice.
+  - A parameter with no annotation does not reach `frappe.db.get_value`, `frappe.db.exists`, `frappe.get_all`,
+    `frappe.get_doc`, `frappe.get_cached_doc`, `frappe.db.set_value`, `frappe.delete_doc` or `frappe.db.delete` as a filter: a JSON body turns it into a list or a dict, which is to say
+    an operator or a filter of the caller's choice.
     Annotated, Frappe validates it; `if not isinstance(name, str): frappe.throw(...)` settles it too, in the method or
     in a helper called before the query. An annotation is always possible, so no reason excuses this one.
 
@@ -96,6 +97,11 @@ FILTER_POSITION = {
     "frappe.db.exists": 1,
     "frappe.get_all": 2,
     "frappe.db.get_all": 2,
+    "frappe.get_doc": 1,
+    "frappe.get_cached_doc": 1,
+    "frappe.db.set_value": 1,  # with a dict it writes every row that matches
+    "frappe.delete_doc": 1,
+    "frappe.db.delete": 1,
 }
 FILTER_KEYWORDS = {"filters", "or_filters", "dn"}
 # Give back what they are given, or a part of it: anything else (`str`, `cstr`, `.strip()`) makes it a text or fails.
