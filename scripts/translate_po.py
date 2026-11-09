@@ -46,6 +46,14 @@ Design, on purpose:
   mode (CLAUDE_CODE_OAUTH_TOKEN): translation is volume, not reasoning, and
   Haiku 5.5 does it well for much less (fleet rule since 2026-10-08, Sonnet before).
 - Fixes the PO `Language:` header while here (an empty one kills `bench build`).
+- Writes the file IN PLACE (#1953): the answers go into the text of the file, on the `msgstr ""` line of each
+  entry they fill, and nothing else moves. It used to read the catalogue with polib and save it back, which
+  re-wraps every long msgstr at 78 columns: the night rewrote thousands of lines it had no reason to touch
+  (6 420 lines of one fr.po for a few filled entries), and every branch that had edited the same entries in
+  the old form then merged into duplicate entries and two translations glued in one msgstr. The file is
+  written only when a re-read proves that every filled entry carries its answer and that no other entry, no
+  comment, no flag and no line moved; if it does not, nothing is written and the run fails, loudly. A plural
+  entry is not filled (it has no bare `msgstr`): it is not asked for either.
 
 Exit 0 whether or not anything changed, and after a partial failure; prints a
 one-line summary. A single failed batch never raises into the workflow: it logs and
@@ -418,6 +426,177 @@ def translate_batch(
         result[i] = t
     return result
 
+# --- writing the answers into the file ------------------------------------------------------------
+
+_FIELD = re.compile(r'^(msgctxt|msgid_plural|msgid|msgstr(?:\[\d+\])?) "(.*)"$')
+_LANGUAGE_HEADER = re.compile(r'^"Language:[ \t]*\\n"$')
+
+
+class WriteRefused(RuntimeError):
+    """The file was not written: the re-read could not prove that only the filled lines changed."""
+
+
+def _scan_entries(lines: list[str]) -> list[dict]:
+    """The entries of a PO text, in file order, as {field: [first line, last line, text]} (line numbers from 0).
+
+    Enough of the format to find where a msgstr stands: msgctxt, msgid, msgid_plural, msgstr and msgstr[n],
+    each on one line or over continuation lines, an entry ending at a blank line or where the next one starts.
+    Obsolete entries (`#~`) and comments are not fields and are never read.
+    """
+    entries: list[dict] = []
+    entry: dict | None = None
+    field: str | None = None
+    for number, raw in enumerate(lines):
+        line = raw.rstrip("\r")
+        found = _FIELD.match(line)
+        if found:
+            name, body = found.groups()
+            starts = name == "msgctxt" or (
+                name == "msgid" and (entry is None or any(k.startswith("msgstr") for k in entry))
+            )
+            if starts or entry is None:
+                entry = {}
+                entries.append(entry)
+            entry[name] = [number, number, polib.unescape(body)]
+            field = name
+        elif field is not None and entry is not None and len(line) >= 2 and line[0] == '"' and line[-1] == '"':
+            entry[field][1] = number
+            entry[field][2] += polib.unescape(line[1:-1])
+        else:
+            field = None
+            if not line.strip():
+                entry = None
+    return entries
+
+
+def _filled_lines(
+    lines: list[str], answers: dict[tuple[str, str | None], str], language: str
+) -> tuple[list[str], int, bool]:
+    """(new lines, entries filled, header fixed): `lines` with each answer put on the `msgstr ""` line of its
+    entry, and the empty `Language:` line of the header given `language`. Nothing else is touched.
+
+    Only a bare `msgstr ""` on a line of its own is filled: a plural entry, a msgstr that is not empty and one
+    written over continuation lines are left exactly as they are.
+    """
+    entries = _scan_entries(lines)
+    replace: dict[int, str] = {}
+    after: dict[int, str] = {}
+    filled = 0
+    for entry in entries:
+        if "msgid" not in entry or "msgstr" not in entry or "msgid_plural" in entry:
+            continue
+        msgid = entry["msgid"][2]
+        first, last, value = entry["msgstr"]
+        if not msgid or value != "" or first != last:
+            continue
+        key = (msgid, entry["msgctxt"][2] if "msgctxt" in entry else None)
+        if key in answers:
+            replace[first] = f'msgstr "{polib.escape(answers[key])}"'
+            filled += 1
+
+    fixed = False
+    header = next((e for e in entries if "msgid" in e and e["msgid"][2] == "" and "msgctxt" not in e), None)
+    if header is not None and "msgstr" in header and language:
+        first, last, text = header["msgstr"]
+        current = re.search(r"^Language:[ \t]*(.*)$", text, re.MULTILINE)
+        if current is None:
+            after[last] = f'"Language: {language}\\n"'
+            fixed = True
+        elif not current.group(1).strip():
+            at = next((i for i in range(first, last + 1) if _LANGUAGE_HEADER.match(lines[i].rstrip("\r"))), None)
+            if at is not None:
+                replace[at] = f'"Language: {language}\\n"'
+                fixed = True
+
+    new: list[str] = []
+    for number, raw in enumerate(lines):
+        eol = "\r" if raw.endswith("\r") else ""
+        new.append(replace[number] + eol if number in replace else raw)
+        if number in after:
+            new.append(after[number] + eol)
+    return new, filled, fixed
+
+
+def _duplicates(catalogue: polib.POFile) -> set[tuple[str | None, str]]:
+    seen: set[tuple[str | None, str]] = set()
+    twice: set[tuple[str | None, str]] = set()
+    for e in catalogue:
+        key = (e.msgctxt, e.msgid)
+        (twice if key in seen else seen).add(key)
+    return twice
+
+
+def _prove(original: str, written: str, answers: dict, language: str, filled: int, fixed: bool) -> list[str]:
+    """What is wrong with `written` as a re-read of `original` plus the answers: [] when nothing is."""
+    problems: list[str] = []
+    try:
+        before, after = polib.pofile(original), polib.pofile(written)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        return [f"the result cannot be read back: {e}"]
+    if len(before) != len(after):
+        return [f"{len(before)} entries became {len(after)}"]
+    if _duplicates(after) != _duplicates(before):
+        problems.append("an entry is written twice that was not")
+    seen = 0
+    for a, b in zip(before, after):
+        shape = lambda e: (  # noqa: E731 - everything an entry holds but its translation
+            e.msgctxt, e.msgid, e.msgid_plural, e.obsolete, e.flags, e.comment, e.tcomment, e.occurrences,
+            e.msgstr_plural,
+        )
+        if shape(a) != shape(b):
+            problems.append(f"{a.msgid[:60]!r} changed other than by its translation")
+        elif a.msgstr == b.msgstr:
+            continue
+        elif a.msgstr == "" and not a.obsolete and not a.msgid_plural and b.msgstr == answers.get((a.msgid, a.msgctxt)):
+            seen += 1
+        else:
+            problems.append(f"{a.msgid[:60]!r}: msgstr {a.msgstr!r} became {b.msgstr!r}")
+    if seen != filled:
+        problems.append(f"{filled} entries should have been filled and {seen} were")
+    metadata = dict(before.metadata)
+    if fixed:
+        metadata["Language"] = language
+    if dict(after.metadata) != metadata:
+        problems.append("the header changed other than by its Language")
+    return problems
+
+
+def write_in_place(path: str, answers: dict[tuple[str, str | None], str], language: str) -> int:
+    """Put `answers` ({(msgid, msgctxt): msgstr}) into the PO file at `path`, without rewriting the rest.
+
+    Returns how many entries were filled. The file is read and written byte for byte (line endings kept),
+    and written only if `_prove` finds nothing wrong; otherwise raises WriteRefused and the file stays as it
+    was. With no answer and a good header the file is not even opened for writing.
+    """
+    with open(path, encoding="utf-8", newline="") as fh:
+        original = fh.read()
+    lines = original.split("\n")
+    new_lines, filled, fixed = _filled_lines(lines, answers, language)
+    if not filled and not fixed:
+        return 0
+    written = "\n".join(new_lines)
+    problems = _prove(original, written, answers, language, filled, fixed)
+    if problems:
+        raise WriteRefused("; ".join(problems[:5]))
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(written)
+    return filled
+
+
+def _persist(po_path: str, answers: dict, language: str) -> int:
+    """Write the answers (and the Language header) into the file in place. 0 when done, 1 when the re-read could
+    not prove that only the filled lines changed: nothing is written then, and the night fails, because a
+    translator that cannot write safely must not stay green."""
+    try:
+        written = write_in_place(po_path, answers, language)
+    except WriteRefused as e:
+        print(f"::error::{os.path.basename(po_path)} NOT WRITTEN: {e}. The file is as it was; the translations "
+              "of this run are lost and the next run asks again.", flush=True)
+        return 1
+    if written:
+        print(f"{os.path.basename(po_path)}: {written} entry(ies) filled in place, nothing else moved")
+    return 0
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -433,12 +612,13 @@ def main() -> int:
         print(f"no PO file at {args.po_path} — nothing to do")
         return 0
 
+    # The catalogue is READ with polib to know what to translate and never saved by it: the answers go into
+    # the text of the file (write_in_place), and the empty Language header is given while here.
     po = polib.pofile(args.po_path)
-    # An empty Language header kills bench build later — set it while here.
-    if not (po.metadata.get("Language") or "").strip():
-        po.metadata["Language"] = args.locale
+    answers: dict[tuple[str, str | None], str] = {}
 
-    todo = [e for e in po if not e.obsolete and e.msgid and not e.msgstr]
+    # A plural entry has no bare msgstr to fill: it is neither asked for nor written.
+    todo = [e for e in po if not e.obsolete and e.msgid and not e.msgstr and not e.msgid_plural]
 
     # A bare msgid the core already translates stays empty (see the design notes): it is not asked, and
     # it does not count against --max.
@@ -473,8 +653,7 @@ def main() -> int:
               + (" …" if len(by_declaration) > 12 else ""))
     if not todo:
         print(f"{os.path.basename(args.po_path)}: 0 to translate — nothing to do")
-        po.save(args.po_path)  # persist the Language header fix if any
-        return 0
+        return _persist(args.po_path, answers, args.locale)  # the Language header fix, if any
 
     todo = todo[: args.max]
     retired = read_glossary(Path(args.po_path), args.locale)
@@ -493,7 +672,7 @@ def main() -> int:
         except AccountLimitError as e:
             # No later batch can work: stop at the first, keep what this file already holds (and the
             # Language header fix), and FAIL the run once, with the reason, instead of going green.
-            po.save(args.po_path)
+            _persist(args.po_path, answers, args.locale)  # keep what this file already holds
             print(f"::error::Claude account limit reached: {e}. Nothing more can be translated until it "
                   f"resets; {os.path.basename(args.po_path)} keeps {filled} new translation(s) of "
                   f"{len(todo)} to do. Re-run this workflow after the reset.", flush=True)
@@ -506,11 +685,16 @@ def main() -> int:
         answered += 1
         for i, entry in enumerate(chunk):
             if i in got:
-                entry.msgstr = got[i]
+                entry.msgstr = got[i]  # in memory only, for the count below
+                answers[(entry.msgid, entry.msgctxt)] = got[i]
                 filled += 1
 
-    po.save(args.po_path)
-    still_empty = len([e for e in po if not e.obsolete and e.msgid and not e.msgstr and id(e) not in left_ids])
+    refused = _persist(args.po_path, answers, args.locale)
+    if refused:
+        return refused
+    still_empty = len(
+        [e for e in po if not e.obsolete and e.msgid and not e.msgstr and not e.msgid_plural and id(e) not in left_ids]
+    )
     print(f"{os.path.basename(args.po_path)}: filled {filled}/{len(todo)} "
           f"(of {still_empty + filled} to translate) with {args.model}")
     if not answered:

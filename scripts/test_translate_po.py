@@ -846,5 +846,270 @@ class TestTheWordsAnAppRetiredAreNotWrittenAgain(unittest.TestCase):
         self.assertNotIn("RETIRED", call.call_args.args[0])
 
 
+LONG_TRANSLATION = (
+    "Cette phrase est volontairement longue pour dépasser la largeur de soixante-dix-huit colonnes "
+    "à laquelle polib replie chaque msgstr quand il enregistre un fichier."
+)
+
+# A catalogue as the bench writes it: Babel's one-line entries next to Babel's wrapped ones (76 columns), a context,
+# a msgid over several lines, a plural, an obsolete entry and flags. polib would rewrite most of it.
+IN_PLACE_PO = (
+    'msgid ""\n'
+    'msgstr ""\n'
+    '"Project-Id-Version: Test VERSION\\n"\n'
+    '"Language: fr\\n"\n'
+    '"MIME-Version: 1.0\\n"\n'
+    '"Content-Type: text/plain; charset=utf-8\\n"\n'
+    "\n"
+    "#: app/a.py:1\n"
+    'msgid "Long one"\n'
+    f'msgstr "{LONG_TRANSLATION}"\n'
+    "\n"
+    "#: app/b.py:2\n"
+    "#, python-brace-format\n"
+    'msgid "Wrapped {0}"\n'
+    'msgstr ""\n'
+    '"Une traduction que Babel a repliée sur deux lignes, avec son {0} : elle ne "\n'
+    '"doit pas bouger."\n'
+    "\n"
+    "#: app/c.py:3\n"
+    'msgid "First empty"\n'
+    'msgstr ""\n'
+    "\n"
+    "#: app/d.py:4\n"
+    'msgctxt "Gym"\n'
+    'msgid "Second empty"\n'
+    'msgstr ""\n'
+    "\n"
+    "#: app/e.py:5\n"
+    'msgid ""\n'
+    '"A message whose msgid Babel wrapped over two lines, because it is longer than the "\n'
+    '"width of the file"\n'
+    'msgstr ""\n'
+    "\n"
+    "#: app/f.py:6\n"
+    'msgid "One file"\n'
+    'msgid_plural "{0} files"\n'
+    'msgstr[0] ""\n'
+    'msgstr[1] ""\n'
+    "\n"
+    "#. Label of a Data field\n"
+    "#: app/g.json:7\n"
+    'msgid "Done"\n'
+    'msgstr "Fait"\n'
+    "\n"
+    '#~ msgid "Gone"\n'
+    '#~ msgstr "Parti"\n'
+)
+
+
+class TestTheFileIsFilledInPlace(unittest.TestCase):
+    """The answers go into the text of the file; nothing else moves (#1953).
+
+    The robot used to read the catalogue with polib and save it back: polib re-wraps every long msgstr at 78
+    columns, so a night that filled a few entries rewrote thousands of lines (6 420 of one fr.po), and a branch
+    that had edited the same entries in the old form then merged into entries written twice and two translations
+    glued in one msgstr (133 and 56 in one app).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "fr.po"
+
+    def _write(self, text):
+        self.path.write_bytes(text.encode("utf-8"))
+
+    def _text(self):
+        return self.path.read_bytes().decode("utf-8")
+
+    def _run(self, answers=None):
+        """(exit code, output, msgids the model was asked for) of one `main()` on the file; the model answers
+        `FR <msgid>` unless `answers` ({msgid: translation}) says otherwise."""
+        asked = []
+
+        def model(command, **kwargs):
+            prompt = command[command.index("-p") + 1]
+            items = json.loads(prompt.split("Translate these items:\n", 1)[1])
+            asked.extend(item["s"] for item in items)
+            reply = [{"i": it["i"], "t": (answers or {}).get(it["s"], "FR " + it["s"])} for it in items]
+            return _cli(stdout=json.dumps({"is_error": False, "result": json.dumps(reply, ensure_ascii=False)}))
+
+        out = io.StringIO()
+        argv = ["translate_po.py", str(self.path), "--locale", "fr"]
+        with patch.object(sys, "argv", argv), patch.object(translate_po.subprocess, "run", side_effect=model):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = translate_po.main()
+        return code, out.getvalue(), asked
+
+    def _changed_lines(self, before, after):
+        """[(old line, new line)] of the lines that differ, the two texts having as many lines."""
+        old, new = before.split("\n"), after.split("\n")
+        self.assertEqual(len(old), len(new), "the number of lines changed")
+        return [(a, b) for a, b in zip(old, new) if a != b]
+
+    def test_only_the_empty_msgstr_lines_change_and_everything_else_is_byte_identical(self):
+        self._write(IN_PLACE_PO)
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        after = self._text()
+        self.assertEqual(
+            self._changed_lines(IN_PLACE_PO, after),
+            [
+                ('msgstr ""', 'msgstr "FR First empty"'),
+                ('msgstr ""', 'msgstr "FR Second empty"'),
+                (
+                    'msgstr ""',
+                    'msgstr "FR A message whose msgid Babel wrapped over two lines, because it is longer than the '
+                    'width of the file"',
+                ),
+            ],
+        )
+        # the long one-line msgstr (polib wraps it) and the wrapped one (polib rewrites it) are as they were
+        self.assertIn(f'msgstr "{LONG_TRANSLATION}"\n', after)
+        self.assertIn('"Une traduction que Babel a repliée sur deux lignes, avec son {0} : elle ne "\n', after)
+        self.assertIn('#~ msgid "Gone"\n', after)
+        self.assertEqual(sorted(asked), sorted([
+            "First empty", "Second empty",
+            "A message whose msgid Babel wrapped over two lines, because it is longer than the width of the file",
+        ]), "the plural entry is not asked for: there is nowhere to write it")
+
+    def test_the_old_way_rewrote_the_file(self):
+        """Why the fix: the same file, read and saved by polib, no longer has the lines it had."""
+        self._write(IN_PLACE_PO)
+        saved = Path(self._tmp.name) / "saved.po"
+        polib.pofile(str(self.path)).save(str(saved))
+        self.assertNotIn(f'msgstr "{LONG_TRANSLATION}"\n', saved.read_text(encoding="utf-8"))
+
+    def test_the_result_is_read_back_by_polib_with_each_answer_on_its_entry(self):
+        self._write(IN_PLACE_PO)
+        self._run()
+        entries = {(e.msgid, e.msgctxt): e for e in polib.pofile(str(self.path))}
+        self.assertEqual(entries[("First empty", None)].msgstr, "FR First empty")
+        self.assertEqual(entries[("Second empty", "Gym")].msgstr, "FR Second empty")
+        self.assertEqual(entries[("Done", None)].msgstr, "Fait")
+        plural = entries[("One file", None)]
+        self.assertEqual(plural.msgstr_plural, {0: "", 1: ""})
+
+    def _all_filled(self):
+        """IN_PLACE_PO with its three empty entries translated, so that nothing is left to ask for."""
+        text = IN_PLACE_PO
+        for old, new in (
+            ('msgid "First empty"\nmsgstr ""', 'msgid "First empty"\nmsgstr "Premier"'),
+            ('msgid "Second empty"\nmsgstr ""', 'msgid "Second empty"\nmsgstr "Second"'),
+            ('"width of the file"\nmsgstr ""', '"width of the file"\nmsgstr "Long"'),
+        ):
+            self.assertEqual(text.count(old), 1, old)
+            text = text.replace(old, new)
+        return text
+
+    def test_nothing_to_translate_leaves_the_file_as_it_is(self):
+        done = self._all_filled()
+        self._write(done)
+        before_stat = self.path.stat()
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(asked, [])
+        self.assertEqual(self._text(), done)
+        self.assertEqual(self.path.stat().st_mtime_ns, before_stat.st_mtime_ns, "the file was written for nothing")
+
+    def test_an_empty_language_header_is_given_and_nothing_else_moves(self):
+        empty = IN_PLACE_PO.replace('"Language: fr\\n"', '"Language: \\n"')
+        self._write(empty)
+        self._run()
+        after = self._text()
+        changed = self._changed_lines(empty, after)
+        self.assertIn(('"Language: \\n"', '"Language: fr\\n"'), changed)
+        self.assertEqual(len(changed), 4, changed)  # the header and the three filled entries
+        self.assertEqual(polib.pofile(str(self.path)).metadata["Language"], "fr")
+
+    def test_a_header_with_no_language_line_gets_one_and_nothing_else_moves(self):
+        without = IN_PLACE_PO.replace('"Language: fr\\n"\n', "")
+        self._write(without)
+        self._run()
+        after = self._text()
+        self.assertEqual(len(after.split("\n")), len(without.split("\n")) + 1)
+        self.assertEqual(polib.pofile(str(self.path)).metadata["Language"], "fr")
+        self.assertIn(f'msgstr "{LONG_TRANSLATION}"\n', after)
+
+    def test_only_the_header_to_fix_and_nothing_to_translate_still_writes_the_header(self):
+        done = self._all_filled().replace('"Language: fr\\n"', '"Language: \\n"')
+        self._write(done)
+        code, output, asked = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(asked, [])
+        self.assertEqual(self._changed_lines(done, self._text()), [('"Language: \\n"', '"Language: fr\\n"')])
+
+    def test_a_quote_a_backslash_and_accents_are_escaped_as_the_file_format_wants(self):
+        self._write(IN_PLACE_PO)
+        word = 'Dites « bonjour » : "ok" \\ fini'
+        code, output, _ = self._run({"First empty": word})
+        self.assertEqual(code, 0, output)
+        self.assertIn(r'msgstr "Dites « bonjour » : \"ok\" \\ fini"', self._text())
+        first = {e.msgid: e.msgstr for e in polib.pofile(str(self.path))}["First empty"]
+        self.assertEqual(first, word)
+
+    def test_line_endings_are_kept(self):
+        crlf = IN_PLACE_PO.replace("\n", "\r\n")
+        self.path.write_bytes(crlf.encode("utf-8"))
+        code, output, _ = self._run()
+        self.assertEqual(code, 0, output)
+        raw = self.path.read_bytes().decode("utf-8")
+        self.assertEqual(raw.count("\r\n"), raw.count("\n"), "a line lost its CR")
+        self.assertIn('msgstr "FR First empty"\r\n', raw)
+
+    def test_an_entry_written_twice_is_filled_in_both_places_and_nothing_else_is_added(self):
+        twice = IN_PLACE_PO + '\n#: app/h.py:8\nmsgid "First empty"\nmsgstr ""\n'
+        self._write(twice)
+        code, output, _ = self._run()
+        self.assertEqual(code, 0, output)
+        after = self._text()
+        self.assertEqual(after.count('msgstr "FR First empty"'), 2)
+        self.assertEqual(len(after.split("\n")), len(twice.split("\n")))
+
+    def test_a_write_that_the_reread_cannot_vouch_for_is_refused_and_fails_the_night(self):
+        """If the text edit ever moved something else, nothing is written: the file stays as it was."""
+        self._write(IN_PLACE_PO)
+        real = translate_po._filled_lines
+
+        def clumsy(lines, answers, language):
+            new, filled, fixed = real(lines, answers, language)
+            return [line.replace('msgstr "Fait"', 'msgstr "Terminé"') for line in new], filled, fixed
+
+        with patch.object(translate_po, "_filled_lines", clumsy):
+            code, output, _ = self._run()
+        self.assertEqual(code, 1, output)
+        self.assertIn("NOT WRITTEN", output)
+        self.assertEqual(self._text(), IN_PLACE_PO)
+
+    def test_a_write_that_loses_an_entry_is_refused(self):
+        self._write(IN_PLACE_PO)
+        real = translate_po._filled_lines
+
+        def losing(lines, answers, language):
+            new, filled, fixed = real(lines, answers, language)
+            dropped = ("app/g.json", 'msgid "Done"', 'msgstr "Fait"')
+            return [line for line in new if not any(word in line for word in dropped)], filled, fixed
+
+        with patch.object(translate_po, "_filled_lines", losing):
+            code, output, _ = self._run()
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._text(), IN_PLACE_PO)
+
+    def test_a_limit_met_halfway_writes_what_was_filled_in_place_too(self):
+        self._write(IN_PLACE_PO)
+        replies = [_ok_cli([(0, "Premier")]), _limit_cli()]
+        out = io.StringIO()
+        argv = ["translate_po.py", str(self.path), "--locale", "fr", "--batch", "1"]
+        with patch.object(sys, "argv", argv), patch.object(
+            translate_po.subprocess, "run", side_effect=lambda *a, **k: replies.pop(0)
+        ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = translate_po.main()
+        self.assertEqual(code, 1, out.getvalue())
+        after = self._text()
+        self.assertEqual(len(self._changed_lines(IN_PLACE_PO, after)), 1)
+        self.assertIn(f'msgstr "{LONG_TRANSLATION}"\n', after)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

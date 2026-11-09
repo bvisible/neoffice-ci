@@ -9,6 +9,12 @@
 # verified by the translator (scripts/translate_po.py in this repo); a returned
 # string that lost one is dropped, never written. PO only, never CSV (fleet rule).
 #
+# The translator writes the .po IN PLACE: each answer goes on the `msgstr ""` line of its entry
+# and nothing else in the file moves (no polib re-save, which re-wrapped thousands of lines and
+# left entries written twice and translations glued after a merge: #1953). It writes only when a
+# re-read proves it; otherwise the run fails. The shape check below stops a catalogue that has a
+# new entry written twice or two translations glued, before the commit.
+#
 # A bare msgid that frappe or a dependency app of this bench (`install_apps`) already
 # translates is left EMPTY, not translated again: Frappe merges every app into one
 # dictionary, so this app's word would replace the core's on every screen (#619). List
@@ -172,6 +178,25 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # translation is volume, not reasoning: Haiku 5.5 since 2026-10-08 (fleet rule, Sonnet before)
           TRANSLATE_MODEL: claude-haiku-5-5
+
+      - name: Refuse a catalogue the night damaged (entry written twice, translations glued)
+        # The translator writes in place (#1953) and this stands behind it: a problem the committed file did
+        # not have stops the run before the commit. Damage already in the committed file is a warning, not a
+        # stop, or every night would stay red, and translate nothing, until somebody had repaired it.
+        working-directory: /home/runner/frappe-bench
+        run: |
+          curl -fsSL -o /tmp/check_po_shape.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_po_shape.py
+          BENCH_APP="apps/${{ inputs.app }}"
+          STATUS=0
+          for loc in ${LOCALES//,/ }; do
+            for po in $(cd "$BENCH_APP" && find . -path "*/locale/${loc}.po"); do
+              python3 /tmp/check_po_shape.py --before "$GITHUB_WORKSPACE/$po" "$BENCH_APP/$po" || STATUS=1
+            done
+          done
+          exit $STATUS
+        env:
+          LOCALES: ${{ inputs.locales }}
 
       - name: Compile PO -> MO
         working-directory: /home/runner/frappe-bench
