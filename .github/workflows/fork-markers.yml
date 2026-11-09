@@ -93,6 +93,55 @@ jobs:
             echo "::warning::the permission check could not be fetched: skipped"
           fi
 
+  contracts:
+    # What we changed on purpose is still changed (scripts/fork_contracts.py, neoffice-maintenance#2398). A `////`
+    # marker says why we removed a line; it does not stop the next upstream merge from putting the same rule back in
+    # another place, with no conflict. A fork writes its decisions as the rows of a `| Contract |` table in
+    # NEOFFICE_FORK_MARKERS.md; no table, nothing to judge. A job of its own, like the two above: a broken contract has
+    # nothing to do with the markers, whose bot must still run. The second step lists, for each merge commit of the
+    # push, the lines upstream added that narrow a screen (scripts/upstream_radar.py): a list for a person to try on
+    # osiris with our data, never a verdict.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    name: what we changed on purpose is still changed
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Judge the contracts of the manifest
+        run: |
+          if curl -sfL -o /tmp/fork_contracts.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/fork_contracts.py; then
+            python3 /tmp/fork_contracts.py --root .
+          else
+            echo "::warning::the contract check could not be fetched: skipped"
+          fi
+      - name: List what the merges of this push narrow on a screen
+        env:
+          BASE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || { echo "the base is gone: skipped"; exit 0; }
+          merges=$(git rev-list --merges "$BASE..$HEAD_SHA" | head -5)
+          [ -n "$merges" ] || { echo "no merge commit in this push"; exit 0; }
+          if ! curl -sfL -o /tmp/upstream_radar.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/upstream_radar.py; then
+            echo "::warning::the radar could not be fetched: skipped"
+            exit 0
+          fi
+          for m in $merges; do
+            {
+              echo "### Merge ${m:0:10}: what upstream added that narrows a screen"
+              echo
+              python3 /tmp/upstream_radar.py --base "$m^1" --head "$m" --markdown | head -c 60000
+              echo
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
   markers:
     runs-on: ubuntu-latest
     permissions:
