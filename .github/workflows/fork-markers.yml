@@ -164,8 +164,16 @@ jobs:
               fi
             done
           fi
+          # The tree the marker pass starts from. actions/checkout took the branch TIP when the job started, and
+          # that is ahead of the pushed sha whenever another job (build-frontend) pushed its compiled files first
+          # (a job that waited for a runner). The range above stays base..head: what the push changed. What the
+          # pass wrote is measured from the tip, or the compiled files that arrived meanwhile read as non-comment
+          # lines it added, and a correct pass is discarded (neoffice-maintenance#2320).
+          TIP=$(git rev-parse HEAD)
+          echo "tip=$TIP" >> "$GITHUB_OUTPUT"
           echo "base=$BASE" >> "$GITHUB_OUTPUT"; echo "head=$HEAD" >> "$GITHUB_OUTPUT"
           echo "range: $BASE..$HEAD"
+          echo "the marker pass starts from ${TIP:0:10}"
 
       - name: Check the markers
         id: check
@@ -265,7 +273,7 @@ jobs:
       - name: Accept the pass only if it is comment-only and still compiles
         if: steps.check.outputs.unmarked != '0' && steps.check.outputs.has_token == 'true'
         run: |
-          if ! python3 /tmp/fm/fork_markers.py verify --base "${{ steps.range.outputs.head }}"; then
+          if ! python3 /tmp/fm/fork_markers.py verify --base "${{ steps.range.outputs.tip }}"; then
             echo "::error::the marker pass changed more than comments — discarded, nothing pushed"
             git checkout -- . && git clean -fd
             exit 1
@@ -286,7 +294,7 @@ jobs:
           if [ -n "$(git diff --name-only -- '*.py' '*.pyi')" ]; then
             RUFF_VERSION=$(python3 /tmp/fm/fork_markers.py ruff-version)
             if python3 -m venv /tmp/fm/ruff && /tmp/fm/ruff/bin/pip install -q "ruff==$RUFF_VERSION"; then
-              python3 /tmp/fm/fork_markers.py format --base "${{ steps.range.outputs.head }}" --ruff /tmp/fm/ruff/bin/ruff \
+              python3 /tmp/fm/fork_markers.py format --base "${{ steps.range.outputs.tip }}" --ruff /tmp/fm/ruff/bin/ruff \
                 || echo "::warning::the formatting of the markers failed: they stay where the pass wrote them"
             else
               echo "::warning::ruff $RUFF_VERSION could not be installed: the markers stay where the pass wrote them"
