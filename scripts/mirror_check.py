@@ -21,6 +21,12 @@ Two inputs are allowed to differ, and only these:
 
 * `upstream_preview` -- the flag that makes it a preview at all;
 * `test_args` -- a `workflow_dispatch` input the preview does not expose.
+
+Every secret the tests are given, the preview must be given too (2026-11-09): the theme's
+preview had the tests' apps but was given `CI_REPORT_SECRET` alone where the tests inherit
+every secret, so the private wizard's clone was refused before any test, while this check
+said the two callers agreed. A preview given more (`inherit` where the tests name one) is no
+gap: it is let through.
 """
 
 from __future__ import annotations
@@ -54,6 +60,35 @@ def caller_inputs(path: Path) -> dict[str, str] | None:
     return out
 
 
+def caller_secrets(path: Path) -> str:
+    """What the call gives the reusable workflow: `inherit`, the secret names it passes (sorted), or `(none)`."""
+    text = path.read_text(encoding="utf8")
+    found = re.search(r"^    secrets:[ \t]*([^#\s][^#]*?)?[ \t]*(?:#.*)?$", text, re.M)
+    if not found:
+        return "(none)"
+    if found.group(1):
+        return found.group(1).strip()
+    names = []
+    for line in text[found.end():].splitlines():
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        name = re.match(r"      ([A-Za-z_][A-Za-z0-9_]*):", line)
+        if not name:
+            break
+        names.append(name.group(1))
+    return ", ".join(sorted(names)) if names else "(none)"
+
+
+def lacks_secrets(normal: str, preview: str) -> bool:
+    """Whether the preview is given less than the tests: `inherit` covers everything, names cover themselves."""
+    if preview == "inherit":
+        return False
+    if normal == "inherit":
+        return True
+    given = set(preview.split(", ")) - {"(none)"}
+    return bool(set(normal.split(", ")) - {"(none)"} - given)
+
+
 def main() -> int:
     normal = caller_inputs(NORMAL)
     preview = caller_inputs(PREVIEW)
@@ -66,8 +101,14 @@ def main() -> int:
 
     keys = (set(normal) | set(preview)) - ALLOWED_TO_DIFFER
     bad = [(k, normal.get(k), preview.get(k)) for k in sorted(keys) if normal.get(k) != preview.get(k)]
+    secrets = (caller_secrets(NORMAL), caller_secrets(PREVIEW))
+    if lacks_secrets(*secrets):
+        bad.append(("secrets", *secrets))
     if not bad:
-        print(f"the two callers agree on {len(keys)} input(s) — the preview measures upstream, not itself")
+        print(
+            f"the two callers agree on {len(keys)} input(s) and on their secrets ({secrets[0]})"
+            " — the preview measures upstream, not itself"
+        )
         return 0
 
     print("The upstream preview does NOT mirror the normal CI. Differing inputs:\n")
