@@ -464,9 +464,16 @@ jobs:
           # frappe makes itself when it restores a new site's database (neoffice-maintenance#2041). The
           # container is on the runner's own network: the client is told once, in its own configuration.
           printf '[client]\nskip-ssl\n' > ~/.my.cnf
-          if wget -q -O /tmp/wkhtmltox.deb https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb; then
+          # The release is downloaded through `retry`, a minute at most per attempt: one failed download of it was
+          # the whole nightly run of an app (09.11.2026, suite, neoffice-maintenance#2375), because the apt fallback
+          # has nothing to install since `ubuntu-latest` is 26.04, whose archives no longer carry wkhtmltopdf. The
+          # jammy build still installs on 26.04 (helpdesk, the same night).
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
+          if retry wget -q --timeout=60 --tries=2 -O /tmp/wkhtmltox.deb https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb; then
             sudo apt-get install -yq /tmp/wkhtmltox.deb || sudo apt-get install -yq wkhtmltopdf
           else
+            echo "::warning::the wkhtmltox release could not be downloaded: apt's wkhtmltopdf instead (absent from Ubuntu 26.04)"
             sudo apt-get install -yq wkhtmltopdf
           fi
           wkhtmltopdf --version
