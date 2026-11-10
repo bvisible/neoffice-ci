@@ -51,3 +51,7 @@ nobody until someone touches it. At commit time, in `.pre-commit-config.yaml`:
 
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).
