@@ -25,8 +25,9 @@ jobs:
         with:
           python-version: "3.12"
       # ruff: fork_markers.py format runs the fork's formatter (its tests skip without it)
+      # Babel: check_po_reads.py reads a catalogue as Frappe does (its tests skip without it)
       - name: Install what the scripts import
-        run: pip install polib ruff==0.12.3
+        run: pip install polib ruff==0.12.3 "Babel~=2.18.0"
       - name: Run every test of scripts/
         run: python3 -m unittest discover -s scripts -p "test_*.py"
   workflows:

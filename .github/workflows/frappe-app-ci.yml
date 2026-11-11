@@ -257,8 +257,20 @@ jobs:
   # and skips the heavy job when the tree has not moved since. It asks the HUB and
   # not GitHub on purpose: the callers' token is `contents: read` only, so a job
   # requesting `actions: read` is refused at startup (measured, 2026-09-05).
-  # It FAILS OPEN everywhere: only a `schedule` event can ever be skipped, and any
-  # doubt — no answer, no secret, no history, unparseable date — runs the tests.
+  # It FAILS OPEN everywhere: any doubt — no answer, no secret, no history, unparseable
+  # date — runs the tests.
+  #
+  # A PUSH can skip too, since 11.11.2026, when every file it changed SINCE THE LAST GREEN RUN is
+  # documentation or a translation catalogue (`*.md`, `docs/**`, `.claude/**`, `**/locale/*.po|pot`):
+  # a sentence in a README or a hand-fixed French catalogue paid the whole suite (the theme's fifty
+  # minutes), and the light-check job below reads the catalogues as Frappe compiles them instead
+  # (neoffice-maintenance#2558). The range starts at the last GREEN commit the hub knows, never at
+  # the push's own `before`: the callers' concurrency drops a pending run when a newer push arrives,
+  # so a code commit whose run never happened, or went red, is still in the range of the next push,
+  # and that push runs the suite. A skipped push reports nothing, so the last green does not move:
+  # the next nightly sees new commits and runs the whole suite (the tests that read a catalogue
+  # with Frappe included). A re-run, a first push, a forced push, a list the API may have cut: the
+  # suite runs. See scripts/ci_light_change.py.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -266,12 +278,18 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
       reason: ${{ steps.decide.outputs.reason }}
+      light: ${{ steps.decide.outputs.light }}
+      po: ${{ steps.decide.outputs.po }}
     steps:
       - name: Has anything changed since the last green run?
         id: decide
         env:
           HUB: https://neoservice.neoffice.me/api/method/neoffice_devops.github.ci.last_green
           CI_SECRET: ${{ secrets.CI_REPORT_SECRET }}
+          # The caller's own token, `contents: read`: enough to compare two commits of the
+          # repository under test (no permission is requested, see above).
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ github.run_attempt }}
           # Read-only PAT already used to clone the private fork deps. Here it only
           # asks when bvisible/frappe last moved: an app whose own tree is unchanged
           # must still be re-tested when the framework under it changed, or the gate
@@ -289,8 +307,11 @@ jobs:
           set +e
           decide() { echo "run=$1" >> "$GITHUB_OUTPUT"; echo "reason=$2" >> "$GITHUB_OUTPUT"; echo "$2"; echo "- **$2**" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
 
-          if [ "$EVENT" != "schedule" ]; then
-            decide true "event is $EVENT — always runs (only scheduled runs can be skipped)"
+          if [ "$EVENT" != "schedule" ] && [ "$EVENT" != "push" ]; then
+            decide true "event is $EVENT — always runs (only scheduled runs and documentation-only pushes can be skipped)"
+          fi
+          if [ "$EVENT" = "push" ] && [ "$ATTEMPT" != "1" ]; then
+            decide true "re-run (attempt $ATTEMPT) — always runs"
           fi
           if [ -z "$CI_SECRET" ]; then
             decide true "no CI_REPORT_SECRET on this repo — cannot ask the hub, running"
@@ -306,6 +327,26 @@ jobs:
           if [ -z "$last_sha" ]; then
             decide true "the hub knows no green run for $REPO@$BRANCH (or did not answer) — running"
           fi
+
+          # A push: only documentation and catalogues since the last green commit? The light-check job then
+          # stands in for the suite. Anything else, or any doubt, runs it (scripts/ci_light_change.py).
+          if [ "$EVENT" = "push" ]; then
+            if ! curl -sfL --retry 3 --retry-delay 5 -o /tmp/ci_light_change.py \
+                https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/ci_light_change.py; then
+              decide true "push: the change classifier could not be fetched — running"
+            fi
+            out=$(GITHUB_OUTPUT='' GITHUB_TOKEN="$GH_TOKEN" python3 /tmp/ci_light_change.py decide \
+                  --repo "$REPO" --base "$last_sha" --head "$SHA" 2>&1)
+            why=$(printf '%s\n' "$out" | sed -n 's/^reason=//p' | tail -1)
+            if [ "$(printf '%s\n' "$out" | sed -n 's/^light=//p' | tail -1)" = "true" ]; then
+              po=$(printf '%s\n' "$out" | sed -n 's/^po=//p' | tail -1)
+              echo "light=true" >> "$GITHUB_OUTPUT"
+              echo "po=${po:-[]}" >> "$GITHUB_OUTPUT"
+              decide false "push: $why since the last green run ${last_sha:0:10} — the heavy suite is skipped, the light check stands in"
+            fi
+            decide true "push: ${why:-the change could not be judged} (since the last green run ${last_sha:0:10}) — running"
+          fi
+
           if [ "$last_sha" != "$SHA" ]; then
             decide true "new commits since the last green run (${last_sha:0:10} -> ${SHA:0:10}) — running"
           fi
@@ -340,6 +381,37 @@ jobs:
           fi
 
           decide false "nothing changed since the green run of ${last_at:0:10} on ${SHA:0:10} (${age_days}d ago) — skipped, no minutes spent"
+
+  # What stands in for the suite on a push of documentation and catalogues only (the gate above). A catalogue
+  # is read the way `bench compile-po-to-mo` reads it — Babel's lenient `read_po`, then `write_mo` — and not
+  # with `msgfmt --check`, which refuses entries Frappe has served for months (two in erpnextswiss). Babel is
+  # pinned as our frappe fork pins it. It reports nothing to the hub: it says nothing about the code.
+  light-check:
+    needs: gate
+    if: ${{ needs.gate.outputs.light == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    name: documentation and translations only — light check (${{ inputs.app }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.app_ref || github.sha }}
+
+      - name: The changed catalogues read as Frappe reads them
+        env:
+          PO: ${{ needs.gate.outputs.po }}
+        run: |
+          printf '%s' "$PO" | python3 -c 'import json, sys; sys.stdout.write("".join(p + "\n" for p in json.load(sys.stdin) or []))' > /tmp/catalogues.txt
+          if [ ! -s /tmp/catalogues.txt ]; then
+            echo "no catalogue changed: documentation only, nothing to read"
+            exit 0
+          fi
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/check_po_reads.py \
+            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_po_reads.py
+          python3 -m pip install --quiet "Babel~=2.18.0" || python3 -m pip install --quiet "Babel~=2.18.0"
+          set --
+          while IFS= read -r po; do set -- "$@" "$po"; done < /tmp/catalogues.txt
+          python3 /tmp/check_po_reads.py "$@"
 
   tests:
     needs: gate

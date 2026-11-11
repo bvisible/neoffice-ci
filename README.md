@@ -49,6 +49,12 @@ nobody until someone touches it. At commit time, in `.pre-commit-config.yaml`:
       - id: check-whitelist-permissions
 ```
 
+A push whose files, since the last green run of its branch, are all documentation or translation catalogues
+(`*.md`, `docs/**`, `.claude/**`, `**/locale/*.po|pot`) does not run the heavy suite: a light job reads its
+catalogues the way `bench compile-po-to-mo` does (`scripts/ci_light_change.py`, `scripts/check_po_reads.py`). Any
+doubt — no green run known, a forced push, a re-run, a list the API may have cut — runs the suite, and a skipped push
+reports nothing, so the next nightly still runs the whole suite on it.
+
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.
 
