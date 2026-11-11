@@ -72,12 +72,17 @@ on:
 
 jobs:
   translate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     name: translate (${{ inputs.app }})
     permissions:
       contents: write          # push the translated .po back to the caller repo
     steps:
+      # The bench lives in the runner's HOME: /home/runner on GitHub, the runner's own HOME on our CI machine (a job of
+      # a private repository whose variable CI_RUNNER is neoffice-mini runs there; see frappe-app-ci.yml, tests-mini).
+      - name: Where the bench goes
+        run: echo "BENCH=$HOME/frappe-bench" >> "$GITHUB_ENV"
+
       - name: Clone app
         uses: actions/checkout@v4
         with:
@@ -113,7 +118,7 @@ jobs:
 
       - name: Get dependency apps
         if: inputs.install_apps != ''
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: |
           AUTH="https://github.com/"
           if [ -n "$FLEET_READ_TOKEN" ]; then
@@ -129,13 +134,13 @@ jobs:
           FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
 
       - name: Get the app + its requirements (source must import for pot extraction)
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: |
           bench get-app ${{ inputs.app }} "$GITHUB_WORKSPACE"
           bench setup requirements --dev
 
       - name: Extract source strings and merge into the PO files
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: |
           bench generate-pot-file --app ${{ inputs.app }}
           for loc in ${LOCALES//,/ }; do
@@ -151,7 +156,7 @@ jobs:
         # variable, a custom field description... Put back each translated entry whose
         # source text the app still carries, from the catalogue as committed
         # (neoffice-maintenance#866: 16 translations lost in one night).
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: |
           curl -fsSL -o /tmp/keep_used_translations.py \
             https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/keep_used_translations.py
@@ -166,7 +171,7 @@ jobs:
           LOCALES: ${{ inputs.locales }}
 
       - name: Translate the empty msgstr with Haiku
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: |
           curl -fsSL -o /tmp/translate_po.py \
             https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/translate_po.py
@@ -188,7 +193,7 @@ jobs:
         # The translator writes in place (#1953) and this stands behind it: a problem the committed file did
         # not have stops the run before the commit. Damage already in the committed file is a warning, not a
         # stop, or every night would stay red, and translate nothing, until somebody had repaired it.
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: |
           curl -fsSL -o /tmp/check_po_shape.py \
             https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_po_shape.py
@@ -204,7 +209,7 @@ jobs:
           LOCALES: ${{ inputs.locales }}
 
       - name: Compile PO -> MO
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ env.BENCH }}
         run: bench compile-po-to-mo --app ${{ inputs.app }} || true
 
       - name: Commit the new translations back ([skip ci] — no loop)
@@ -213,7 +218,7 @@ jobs:
           # extraction + translation wrote the .po there, not in the checkout. Copy
           # the .po back into the workspace — which carries the GitHub remote and the
           # push token — then commit from there.
-          BENCH_APP="/home/runner/frappe-bench/apps/${{ inputs.app }}"
+          BENCH_APP="$BENCH/apps/${{ inputs.app }}"
           cd "$BENCH_APP"
           find . -path '*/locale/*.po' -print0 | while IFS= read -r -d '' po; do
             mkdir -p "$GITHUB_WORKSPACE/$(dirname "$po")"

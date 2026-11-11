@@ -163,7 +163,7 @@ jobs:
   # the normal CI. See scripts/mirror_check.py for the two days this cost.
   preview-mirrors-ci:
     if: ${{ inputs.upstream_preview }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
     timeout-minutes: 3
     name: preview mirrors the normal CI (${{ inputs.app }})
     steps:
@@ -182,7 +182,7 @@ jobs:
   # per rule so the debt can be paid rule by rule, and the day a count reaches zero
   # that rule can move into the app's own pre-commit set. See neoffice-maintenance#329.
   semgrep-report:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
     timeout-minutes: 8
     name: semgrep report (${{ inputs.app }})
     continue-on-error: true
@@ -225,7 +225,7 @@ jobs:
   # with (a new branch, a nightly run), or a guard that cannot be fetched: it does not block.
   # See scripts/check_whitelist_permissions.py.
   whitelist-permissions:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     name: a new web method asks for a right (${{ inputs.app }})
     steps:
@@ -272,7 +272,7 @@ jobs:
   # with Frappe included). A re-run, a first push, a forced push, a list the API may have cut: the
   # suite runs. See scripts/ci_light_change.py.
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     name: gate (${{ inputs.app }})
     outputs:
@@ -389,7 +389,7 @@ jobs:
   light-check:
     needs: gate
     if: ${{ needs.gate.outputs.light == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     name: documentation and translations only — light check (${{ inputs.app }})
     steps:
@@ -418,7 +418,8 @@ jobs:
     # Fail open here too: only an EXPLICIT 'false' skips. A gate that errored, timed
     # out or returned nothing leaves the output empty, and the tests run — losing a
     # nightly silently would be worse than the minutes it saves.
-    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
+    # On our CI machine instead when the repository's variable CI_RUNNER is neoffice-mini: `tests-mini` below.
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' && vars.CI_RUNNER != 'neoffice-mini' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.tests_timeout_minutes }}
     name: build + tests (${{ inputs.app }})
@@ -1030,3 +1031,480 @@ jobs:
             short=$(printf '%s' "$resp" | tr -d '\r\n' | cut -c1-200)
             echo "::warning title=CI report refused::the hub did not accept this run's report (${short:-no answer}): no tracker issue was opened or closed"
           fi
+
+  # The same build + tests on OUR CI machine instead of GitHub's (decision of 2026-11-11, "Mac mini first": GitHub bills
+  # a private repository's minutes, about 28 $ a working day, and a public repository runs free). It runs when the
+  # caller's repository has the variable CI_RUNNER=neoffice-mini; without it nothing changes, `tests` above runs on
+  # ubuntu-latest. Back to GitHub: `gh variable delete CI_RUNNER -R bvisible/<repo>`.
+  # The machine: a Linux VM on the Mac mini (Ubuntu 24.04 arm64, 6 CPUs, 20 GiB), one runner per PRIVATE repository
+  # (a runner of ours on a public one would run anyone's pull request: none is registered there, so a public caller
+  # with the variable would only wait). No `services:`: MariaDB 10.6 and Redis are the machine's, and the job first
+  # takes one of its three places (`ci-slot acquire`: three heavy suites at most at once, each with its own database,
+  # its own two Redis and its own stub ports; the fourth waits). Same steps as `tests`, in the same order; what differs
+  # says why. The machine is described in neoffice-devops, scripts/ci-mini/.
+  tests-mini:
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' && vars.CI_RUNNER == 'neoffice-mini' }}
+    runs-on: [self-hosted, linux, arm64, neoffice-mini]
+    # Waiting for a place counts in a job's time: the ceiling is the wait (five hours at most: a wait that gives up
+    # would report a red run that says nothing of the code) plus the suite, whose long steps keep their own ceiling.
+    timeout-minutes: 360
+    name: build + tests (${{ inputs.app }}, neoffice-mini)
+
+    steps:
+      - name: Take a place on the CI machine (three heavy suites at most at once)
+        timeout-minutes: 305
+        run: |
+          ci-slot acquire
+          echo "BENCH=$HOME/frappe-bench" >> "$GITHUB_ENV"
+
+      - name: Clone app under test
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.app_ref || github.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Test modules that break the run for everyone (static, seconds)
+        run: |
+          if curl -sfL -o /tmp/check_test_hygiene.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_test_hygiene.py; then
+            python3 /tmp/check_test_hygiene.py --root .
+          else
+            echo "::warning::the test hygiene check could not be fetched: skipped"
+          fi
+
+      - name: A new test does not act as Administrator (static, seconds)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          if ! git fetch -q --depth=1 origin "$BASE" || ! git fetch -q --deepen=300 origin "$GITHUB_SHA"; then
+            echo "::warning::the base $BASE could not be fetched: the role check is skipped"
+            exit 0
+          fi
+          if curl -sfL -o /tmp/check_test_roles.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_test_roles.py; then
+            python3 /tmp/check_test_roles.py --root . --base "$BASE"
+          else
+            echo "::warning::the role check could not be fetched: skipped"
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          check-latest: true
+
+      # No `Cache pip`: the machine keeps its pip, uv and yarn caches on its own disk (and GitHub's cache would be
+      # downloaded again at every job).
+
+      - name: Retry helper (a registry that answers 5xx for a minute is not a verdict on our code)
+        run: |
+          if ! curl -sfL --retry 3 --retry-delay 5 -o ~/ci_retry.sh \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/ci_retry.sh; then
+            echo "::warning::the retry helper could not be fetched: the steps that download will run once"
+            printf 'retry() { "$@"; }\n' > ~/ci_retry.sh
+          fi
+
+      - name: MariaDB client, Redis and wkhtmltopdf of the machine (installed once, nothing installed here)
+        # The machine carries what the step `Install MariaDB client and wkhtmltopdf` installs on a GitHub runner:
+        # MariaDB 10.6 (server and client), wkhtmltopdf 0.12.6.1 with patched Qt, the xfonts. This only says so.
+        run: |
+          mariadb --version
+          redis-cli -p "$CI_REDIS_CACHE_PORT" ping
+          redis-cli -p "$CI_REDIS_QUEUE_PORT" ping
+          wkhtmltopdf --version
+
+      - name: Init bench (bvisible/frappe version-15 — the fleet's frappe)
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        run: |
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
+          # bench goes into a venv of this runner: setup-python's interpreter is shared by every runner of the machine.
+          PYTHON="$pythonLocation/bin/python"
+          "$PYTHON" -m venv ~/bench-cli
+          retry ~/bench-cli/bin/pip install --quiet frappe-bench
+          export PATH="$HOME/bench-cli/bin:$PATH"
+          echo "$HOME/bench-cli/bin" >> "$GITHUB_PATH"
+          FRAPPE_PATH=https://github.com/bvisible/frappe
+          if [ "${{ inputs.upstream_preview }}" = "true" ]; then
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            echo "UPSTREAM PREVIEW: frappe from $FRAPPE_PATH (erpnext from frappe/erpnext below)"
+          fi
+          init_bench() {
+            rm -rf ~/frappe-bench
+            bench init --skip-redis-config-generation --skip-assets \
+              --frappe-path "$FRAPPE_PATH" \
+              --frappe-branch version-15 \
+              --python "$PYTHON" ~/frappe-bench
+          }
+          retry init_bench
+          ~/frappe-bench/env/bin/pip install --quiet "setuptools<81"
+          ~/frappe-bench/env/bin/python -c "import pkg_resources; print('pkg_resources OK')"
+          # The place's two Redis and the machine's MariaDB (character set and collation set on the server, as
+          # the SET GLOBAL of `tests` does on the service).
+          ci-slot configure-bench ~/frappe-bench
+
+      - name: Upstream preview — carry the tail our fork adds to frappe's tests
+        if: ${{ inputs.upstream_preview == true }}
+        env:
+          FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os, sys, urllib.request
+
+          FILES = ["frappe/tests/__init__.py", "frappe/tests/utils.py"]
+          ADDED = ["frappe/tests/roles.py"]
+          bench = os.path.expanduser("~/frappe-bench/apps/frappe")
+          token = os.environ.get("FLEET_READ_TOKEN", "")
+
+          def ours(rel):
+              url = f"https://api.github.com/repos/bvisible/frappe/contents/{rel}?ref=version-15"
+              headers = {"Accept": "application/vnd.github.raw"}
+              if token:
+                  headers["Authorization"] = "Bearer " + token
+              req = urllib.request.Request(url, headers=headers)
+              return urllib.request.urlopen(req, timeout=30).read().decode("utf-8")
+
+          carried = 0
+          for rel in FILES:
+              target = os.path.join(bench, rel)
+              theirs = open(target, encoding="utf-8").read()
+              mine = ours(rel)
+              base = theirs.rstrip()
+              if not mine.startswith(base):
+                  print(f"::warning::{rel}: our version is not upstream's plus a tail — "
+                        "nothing carried, the errors below are real and need a look")
+                  continue
+              tail = mine[len(base):]
+              if not tail.strip():
+                  print(f"{rel}: no divergence to carry")
+                  continue
+              with open(target, "a", encoding="utf-8") as fh:
+                  fh.write(tail)
+              carried += len(tail)
+              print(f"{rel}: carried {len(tail)} chars")
+          for rel in ADDED:
+              target = os.path.join(bench, rel)
+              if os.path.exists(target):
+                  print(f"::warning::{rel}: upstream has one now — not carried, look at both")
+                  continue
+              with open(target, "w", encoding="utf-8") as fh:
+                  carried += fh.write(ours(rel))
+              print(f"{rel}: carried whole")
+          print(f"total carried onto upstream frappe: {carried} chars")
+          PY
+
+      - name: Get dependency apps
+        if: inputs.install_apps != ''
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: |
+          AUTH="https://github.com/"
+          if [ -n "$FLEET_READ_TOKEN" ]; then
+            AUTH="https://x-access-token:${FLEET_READ_TOKEN}@github.com/"
+          fi
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
+          IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
+          for dep in "${DEPS[@]}"; do
+            dep="$(echo "$dep" | xargs)"
+            [ -z "$dep" ] && continue
+            if [ "${{ inputs.upstream_preview }}" = "true" ] && [ "$dep" = "erpnext" ]; then
+              retry bench get-app erpnext https://github.com/frappe/erpnext --branch version-15 --overwrite
+              continue
+            fi
+            get_dep() {
+              bench get-app "$dep" "${AUTH}bvisible/${dep//_/-}" --branch version-15 --overwrite \
+                || bench get-app "$dep" "${AUTH}bvisible/${dep}" --branch version-15 --overwrite
+            }
+            retry get_dep
+          done
+        env:
+          FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
+
+      - name: Get app under test
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: |
+          # shellcheck source=/dev/null
+          . ~/ci_retry.sh
+          get_app_under_test() {
+            if [ "${{ inputs.skip_build }}" = "true" ]; then
+              bench get-app --overwrite --skip-assets ${{ inputs.app }} "$GITHUB_WORKSPACE" && bench setup requirements --dev
+            else
+              bench get-app --overwrite ${{ inputs.app }} "$GITHUB_WORKSPACE" && bench setup requirements --dev
+            fi
+          }
+          retry get_app_under_test
+          retry ~/frappe-bench/env/bin/pip install --quiet pytest
+
+      - name: New site + install
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: |
+          # The database is this job's own (ci_s<place>_<run>_<attempt>): two jobs never share one. The MariaDB admin
+          # login comes from the bench's configuration (ci-slot configure-bench), never from this file.
+          bench new-site --db-name "$CI_DB_NAME" --db-root-username ci_admin --admin-password admin test_site
+          bench --site test_site set-config auto_email_id test@example.com
+          bench --site test_site set-config mail_server smtp.example.com
+          bench --site test_site set-config mail_login test@example.com
+          bench --site test_site set-config mail_password test
+          bench --site test_site set-config throttle_user_limit 1000 --parse   # --parse: an int, not the string "1000"
+          # PDF rendering resolves /assets URLs against host_name: the place's own port, served by the stub below.
+          bench --site test_site set-config host_name "http://127.0.0.1:$CI_ASSET_PORT"
+          if [[ ",${{ inputs.install_apps }}," == *,hrms,* || "${{ inputs.app }}" == "hrms" ]]; then
+            bench --site test_site set-config user_type_doctype_limit '{"employee_self_service": 80}' --parse
+          fi
+          IFS=',' read -ra DEPS <<< "${{ inputs.install_apps }}"
+          for dep in "${DEPS[@]}"; do
+            dep="$(echo "$dep" | xargs)"
+            [ -z "$dep" ] && continue
+            bench --site test_site install-app "$dep"
+          done
+          bench --site test_site install-app ${{ inputs.app }}
+
+      - name: Serve exchange rates locally (the tests never wait for a rate provider)
+        # As in `tests`, on the place's own port instead of 8001.
+        if: inputs.app == 'erpnext' || contains(inputs.install_apps, 'erpnext')
+        working-directory: ${{ env.BENCH }}/sites
+        run: |
+          nohup python3 - >/dev/null 2>&1 <<'PY' &
+          import http.server, json, os, socketserver, urllib.parse
+          PER_USD = {"USD": 1.0, "EUR": 0.92, "CHF": 0.88, "GBP": 0.79, "INR": 83.0, "PKR": 280.0,
+                     "JPY": 150.0, "CAD": 1.36, "AUD": 1.52, "CNY": 7.2, "SEK": 10.5, "NOK": 10.8, "DKK": 6.9}
+          class H(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.0"
+              def do_GET(self):
+                  url = urllib.parse.urlsplit(self.path)
+                  query = urllib.parse.parse_qs(url.query)
+                  base = (query.get("base") or ["USD"])[0]
+                  target = (query.get("symbols") or ["USD"])[0]
+                  rate = round(PER_USD.get(target, 1.0) / PER_USD.get(base, 1.0), 6)
+                  body = json.dumps({"amount": 1.0, "base": base, "date": url.path.strip("/"), "rates": {target: rate}}).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+              def log_message(self, *a):
+                  pass
+          socketserver.TCPServer.allow_reuse_address = True
+          socketserver.TCPServer(("127.0.0.1", int(os.environ["CI_RATES_PORT"])), H).serve_forever()
+          PY
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null "http://127.0.0.1:$CI_RATES_PORT/2026-01-01?base=USD&symbols=INR" && break
+            sleep 0.5
+          done
+          ../env/bin/python - <<'PY'
+          import os
+          import frappe
+          frappe.init(site="test_site", sites_path=".")
+          frappe.connect()
+          frappe.set_user("Administrator")
+          settings = frappe.get_single("Currency Exchange Settings")
+          settings.service_provider = "Custom"
+          settings.api_endpoint = "http://127.0.0.1:%s/{transaction_date}" % os.environ["CI_RATES_PORT"]
+          settings.set("req_params", [{"key": "base", "value": "{from_currency}"}, {"key": "symbols", "value": "{to_currency}"}])
+          settings.set("result_key", [{"key": "rates"}, {"key": "{to_currency}"}])
+          settings.save()
+          frappe.db.commit()
+          from erpnext.setup.utils import get_exchange_rate
+          rate = get_exchange_rate("USD", "INR")
+          print("exchange rates served on 127.0.0.1:%s, USD to INR:" % os.environ["CI_RATES_PORT"], rate)
+          assert abs(rate - 83.0) < 1e-6, rate
+          PY
+
+      - name: Bootstrap erpnext test data
+        if: contains(inputs.install_apps, 'erpnext') && inputs.erpnext_bootstrap
+        working-directory: ${{ env.BENCH }}
+        run: |
+          bench --site test_site set-config allow_tests true
+          bench --site test_site execute erpnext.setup.utils.before_tests
+
+      - name: Build frappe assets (suites that render frappe web templates)
+        if: inputs.build_frappe_assets
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: bench build --app frappe
+
+      - name: Build (blocking — an app that does not build must not ship)
+        if: inputs.skip_build != true
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: bench build --app ${{ inputs.app }}
+
+      - name: Debug test records (test_args starts with --debug-records)
+        if: startsWith(inputs.test_args, '--debug-records')
+        working-directory: ${{ env.BENCH }}/sites
+        env:
+          DEBUG_SPEC: ${{ inputs.test_args }}
+          APP_UNDER_TEST: ${{ inputs.app }}
+        run: |
+          ../env/bin/python <<'PY'
+          import os
+          import traceback
+
+          import frappe
+          import frappe.test_runner as tr
+
+          frappe.init(site="test_site", sites_path=".")
+          frappe.connect()
+          frappe.flags.in_test = True
+
+          spec = os.environ["DEBUG_SPEC"]
+          target = spec.split(":", 1)[1] if ":" in spec else None
+
+          orig = tr.make_test_objects
+
+          def spy(doctype, test_records=None, verbose=None, reset=False, commit=False):
+              recs = test_records if test_records is not None else frappe.get_test_records(doctype)
+              print(">>>> make_test_objects %s (%d records)" % (doctype, len(recs or [])), flush=True)
+              for r in recs or []:
+                  keys = ("doctype", "item_code", "name", "variant_of", "has_variants", "item_name")
+                  print("     rec:", {k: r.get(k) for k in keys if r.get(k) is not None}, flush=True)
+              return orig(doctype, test_records=test_records, verbose=verbose, reset=reset, commit=commit)
+
+          tr.make_test_objects = spy
+
+          if target:
+              doctypes = [target]
+          else:
+              mods = frappe.get_all("Module Def", {"app_name": os.environ["APP_UNDER_TEST"]}, pluck="name")
+              doctypes = frappe.get_all(
+                  "DocType", filters={"module": ["in", mods]}, pluck="name", order_by="name"
+              )
+          print("==== %d doctypes to walk" % len(doctypes), flush=True)
+          for dt in doctypes:
+              print("==== DT:", dt, flush=True)
+              try:
+                  tr.make_test_records(dt, verbose=1, commit=True)
+                  tr.make_test_records_for_doctype(dt, verbose=1, commit=True)
+              except Exception as exc:
+                  print("!!!! FAILED at doctype:", dt, "->", type(exc).__name__, str(exc)[:300], flush=True)
+                  traceback.print_exc()
+                  break
+          frappe.db.commit()
+          PY
+
+      - name: Serve host_name so wkhtmltopdf can fetch what a print format links
+        # As in `tests`, on the place's own port instead of 8000.
+        if: "!startsWith(inputs.test_args, '--debug-records')"
+        run: |
+          nohup python3 - >/dev/null 2>&1 <<'PY' &
+          import http.server, os, socketserver
+          class H(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.0"
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/plain")
+                  self.send_header("Content-Length", "0")
+                  self.end_headers()
+              do_HEAD = do_GET
+              def log_message(self, *a):
+                  pass
+          socketserver.TCPServer.allow_reuse_address = True
+          socketserver.TCPServer(("127.0.0.1", int(os.environ["CI_ASSET_PORT"])), H).serve_forever()
+          PY
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null "http://127.0.0.1:$CI_ASSET_PORT/ping" && break
+            sleep 0.5
+          done
+          curl -sf -o /dev/null "http://127.0.0.1:$CI_ASSET_PORT/ping" && echo "asset stub up on 127.0.0.1:$CI_ASSET_PORT"
+
+      - name: Run tests
+        if: "!startsWith(inputs.test_args, '--debug-records') && !inputs.parallel_runner"
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: |
+          bench --site test_site set-config allow_tests true
+          set -o pipefail
+          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee /tmp/test-output.log
+        env:
+          TYPE: server
+          CI: "Yes"
+
+      - name: Run tests (parallel runner, one chunk — per-file isolation)
+        if: "!startsWith(inputs.test_args, '--debug-records') && inputs.parallel_runner"
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        working-directory: ${{ env.BENCH }}
+        run: |
+          bench --site test_site set-config allow_tests true
+          set -o pipefail
+          bench --site test_site run-parallel-tests --app ${{ inputs.app }} \
+            --total-builds 1 --build-number 1 2>&1 | tee /tmp/test-output.log
+        env:
+          TYPE: server
+          CI: "Yes"
+
+      - name: Pytest (suites invisible to the frappe runner — blocking when pytest_blocking)
+        if: inputs.pytest_paths != '' && !startsWith(inputs.test_args, '--debug-records')
+        continue-on-error: ${{ !inputs.pytest_blocking }}
+        working-directory: ${{ env.BENCH }}/sites
+        run: |
+          set -o pipefail
+          ../env/bin/pip install --quiet pytest
+          rc=0
+          for p in ${{ inputs.pytest_paths }}; do
+            echo "==== pytest $p"
+            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=short 2>&1 | tail -80 || rc=1
+          done
+          exit $rc
+
+      - name: JavaScript tests of the app (node --test, seconds)
+        if: ${{ !cancelled() && !startsWith(inputs.test_args, '--debug-records') }}
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          shopt -s nullglob
+          files=("$APP"/tests/js/*.test.js)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no JavaScript tests under $APP/tests/js"
+            exit 0
+          fi
+          node --version
+          node --test "${files[@]}"
+
+      - name: Report to the fleet tracker (via the hub)
+        if: (success() || failure()) && !startsWith(inputs.test_args, '--debug-records')
+        env:
+          CI_SECRET: ${{ secrets.CI_REPORT_SECRET }}
+        run: |
+          if [ -z "$CI_SECRET" ]; then
+            echo "::warning title=CI report not sent::no CI_REPORT_SECRET on this repository (secrets: inherit in the caller?): this run opens and closes no tracker issue"
+            exit 0
+          fi
+          SUMMARY=""
+          if [ "${{ job.status }}" != "success" ]; then
+            if [ -f /tmp/test-output.log ]; then
+              SUMMARY=$(tail -c 1400 /tmp/test-output.log)
+            else
+              SUMMARY="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
+            fi
+          fi
+          resp=$(curl -sS --max-time 20 -X POST \
+            "https://neoservice.neoffice.me/api/method/neoffice_devops.github.ci.report" \
+            --data-urlencode "secret=$CI_SECRET" \
+            --data-urlencode "repo=${{ github.repository }}" \
+            --data-urlencode "app=${{ inputs.app }}" \
+            --data-urlencode "sha=${{ github.sha }}" \
+            --data-urlencode "run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --data-urlencode "conclusion=${{ job.status }}" \
+            --data-urlencode "ref=${{ github.ref_name }}" \
+            --data-urlencode "upstream=${{ inputs.upstream_preview }}" \
+            --data-urlencode "summary=${SUMMARY}" 2>&1) || true
+          echo "$resp"
+          if ! printf '%s' "$resp" | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("message", {}).get("ok") else 1)' 2>/dev/null; then
+            short=$(printf '%s' "$resp" | tr -d '\r\n' | cut -c1-200)
+            echo "::warning title=CI report refused::the hub did not accept this run's report (${short:-no answer}): no tracker issue was opened or closed"
+          fi
+
+      - name: Free the place (database, bench and Redis of this job removed)
+        if: always()
+        run: ci-slot release

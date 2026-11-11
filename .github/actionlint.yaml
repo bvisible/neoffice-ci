@@ -1,0 +1,5 @@
+# actionlint knows only GitHub's runner labels. Ours: the CI machine on the Mac mini, for the private repositories
+# (the `tests-mini` jobs; neoffice-devops scripts/ci-mini/).
+self-hosted-runner:
+  labels:
+    - neoffice-mini
