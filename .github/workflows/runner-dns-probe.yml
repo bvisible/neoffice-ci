@@ -5,7 +5,11 @@ name: Runner DNS probe
 # (neoffice-maintenance#2542). This job prints, for each name the install step depends on, what the runner's
 # own resolver says, what Azure's and two public resolvers say, whether the archive answers over HTTP, and
 # whether apt can fetch mariadb-client from the runner's sources and from a fallback mirror.
-# It changes nothing and reports nothing: read its log.
+# It changes nothing and reports nothing: read its log. Kept for the next time the install step cannot reach an
+# archive: `gh workflow run runner-dns-probe.yml -R bvisible/neoffice-ci`. Its first run (2026-11-11 15:12 UTC,
+# ubuntu-26.04 and 24.04 alike): Azure's resolver (168.63.129.16) answered nothing for *.ubuntu.com, 1.1.1.1 and
+# 8.8.8.8 did, the archives answered by address, and kernel.org's and two other mirrors served everything in 3-8 s.
+# scripts/ci_apt_install.sh is what the install step does about it.
 on:
   workflow_dispatch:
 permissions:
