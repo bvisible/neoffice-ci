@@ -1,0 +1,94 @@
+name: Runner DNS probe
+# A measure, started by hand: what a GitHub runner resolves and reaches when apt cannot.
+# On 2026-11-11 from about 13:40 UTC every app CI died in its install step: "Temporary failure resolving"
+# for security.ubuntu.com, archive.ubuntu.com and azure.archive.ubuntu.com, while github.com still answered
+# (neoffice-maintenance#2542). This job prints, for each name the install step depends on, what the runner's
+# own resolver says, what Azure's and two public resolvers say, whether the archive answers over HTTP, and
+# whether apt can fetch mariadb-client from the runner's sources and from a fallback mirror.
+# It changes nothing and reports nothing: read its log.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    name: probe (${{ matrix.os }})
+    steps:
+      - name: Resolver and apt configuration
+        run: |
+          . /etc/os-release; echo "$PRETTY_NAME ($VERSION_CODENAME), image ${ImageVersion:-?}"
+          cat /etc/resolv.conf
+          resolvectl status 2>&1 | head -30 || true
+          echo "--- /etc/apt/apt-mirrors.txt"; cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          echo "--- sources"; ls -la /etc/apt/sources.list.d/
+          cat /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || cat /etc/apt/sources.list 2>/dev/null || true
+
+      - name: Names, through each resolver
+        run: |
+          command -v dig >/dev/null || { sudo apt-get install -yq bind9-dnsutils >/dev/null 2>&1 || true; }
+          for h in security.ubuntu.com archive.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com ubuntu.com \
+              mirrors.edge.kernel.org mirrors.kernel.org mirror.init7.net ftp.halifax.rwth-aachen.de \
+              github.com release-assets.githubusercontent.com objects.githubusercontent.com pypi.org registry.yarnpkg.com; do
+            sys=$(timeout 10 getent ahostsv4 "$h" | awk 'NR==1{print $1}')
+            line=$(printf '%-36s system=%-16s' "$h" "${sys:-FAIL}")
+            for ns in 168.63.129.16 1.1.1.1 8.8.8.8; do
+              a=$(timeout 8 dig +time=3 +tries=1 +short "@$ns" "$h" A 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+              line="$line $ns=${a:-FAIL}"
+            done
+            echo "$line"
+          done
+          echo "--- NS of ubuntu.com (system, then 1.1.1.1)"
+          timeout 10 dig +time=3 +tries=1 NS ubuntu.com | grep -E 'status:|IN\s+NS' || echo "system: no answer"
+          timeout 10 dig +time=3 +tries=1 +short @1.1.1.1 NS ubuntu.com || echo "1.1.1.1: no answer"
+
+      - name: The archives over HTTP
+        run: |
+          . /etc/os-release
+          for u in http://security.ubuntu.com/ubuntu http://archive.ubuntu.com/ubuntu http://azure.archive.ubuntu.com/ubuntu \
+              http://mirrors.edge.kernel.org/ubuntu http://mirror.init7.net/ubuntu http://ftp.halifax.rwth-aachen.de/ubuntu; do
+            code=$(curl -s -o /dev/null -w '%{http_code} %{time_total}s' --max-time 15 "$u/dists/$VERSION_CODENAME/InRelease" || true)
+            echo "$u -> ${code:-no answer}"
+          done
+          echo "--- the same archives, with the address a public resolver gives (is it only the name?)"
+          for h in security.ubuntu.com archive.ubuntu.com; do
+            ip=$(timeout 8 dig +time=3 +tries=1 +short @1.1.1.1 "$h" A 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+            if [ -n "$ip" ]; then
+              code=$(curl -s -o /dev/null -w '%{http_code} %{time_total}s' --max-time 15 --resolve "$h:80:$ip" \
+                "http://$h/ubuntu/dists/$VERSION_CODENAME/InRelease" || true)
+              echo "$h via $ip -> ${code:-no answer}"
+            else
+              echo "$h: 1.1.1.1 gave no address"
+            fi
+          done
+
+      - name: apt from the runner's own sources
+        run: |
+          sudo find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) ! -name 'ubuntu*' -delete
+          start=$(date +%s)
+          sudo timeout 300 apt-get update -q -o Acquire::Retries=1 2>&1 | tail -15 || true
+          echo "apt-get update took $(( $(date +%s) - start ))s"
+          sudo timeout 300 apt-get install -yq --download-only mariadb-client 2>&1 | tail -5 || true
+
+      - name: apt from a fallback mirror only
+        run: |
+          . /etc/os-release
+          for m in http://mirrors.edge.kernel.org/ubuntu http://mirror.init7.net/ubuntu; do
+            echo "=== $m"
+            d=$(mktemp -d)
+            printf 'Types: deb\nURIs: %s\nSuites: %s %s-updates %s-security\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+              "$m" "$VERSION_CODENAME" "$VERSION_CODENAME" "$VERSION_CODENAME" > "$d/fallback.sources"
+            o="-o Dir::Etc::SourceList=/dev/null -o Dir::Etc::SourceParts=$d -o Dir::State::Lists=$d/lists -o Dir::Cache::Archives=$d/archives"
+            sudo mkdir -p "$d/lists/partial" "$d/archives/partial"
+            start=$(date +%s)
+            # shellcheck disable=SC2086
+            sudo timeout 300 apt-get update -q $o 2>&1 | tail -6 || true
+            # shellcheck disable=SC2086
+            sudo timeout 300 apt-get install -yq --download-only $o mariadb-client xfonts-75dpi xfonts-base 2>&1 | tail -3 || true
+            echo "$m: $(( $(date +%s) - start ))s, $(ls "$d/archives" | grep -c '\.deb$') .deb fetched"
+          done
