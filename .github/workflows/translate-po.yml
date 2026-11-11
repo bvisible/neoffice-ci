@@ -57,6 +57,11 @@ on:
         required: false
         type: string
         default: "3.12"
+      node_version:
+        description: "Node.js for the runner. Default 22, as frappe-app-ci.yml and the fleet: bench yarn-installs a root package.json at get-app, and mint's (@tailwindcss/oxide) refuses Node 18, which killed its first run before any string was read (neoffice-maintenance#1490)."
+        required: false
+        type: string
+        default: "22"
     secrets:
       FLEET_READ_TOKEN:
         description: "Read token for PRIVATE bvisible dependency repos. Callers pass `secrets: inherit`."
@@ -88,7 +93,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: ${{ inputs.node_version }}
           check-latest: true
 
       - name: Install the Claude CLI (Haiku, billed to the subscription)
