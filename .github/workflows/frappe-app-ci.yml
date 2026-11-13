@@ -929,7 +929,9 @@ jobs:
         run: |
           bench --site test_site set-config allow_tests true
           set -o pipefail
-          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee /tmp/test-output.log
+          # The log goes to $RUNNER_TEMP, the runner's folder for this job's files (emptied before every job), next to
+          # the logs of the JavaScript and pytest suites: the report step reads them all from there (#2635).
+          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee "$RUNNER_TEMP/test-output.log"
         env:
           TYPE: server
           CI: "Yes"
@@ -944,7 +946,7 @@ jobs:
           bench --site test_site set-config allow_tests true
           set -o pipefail
           bench --site test_site run-parallel-tests --app ${{ inputs.app }} \
-            --total-builds 1 --build-number 1 2>&1 | tee /tmp/test-output.log
+            --total-builds 1 --build-number 1 2>&1 | tee "$RUNNER_TEMP/test-output.log"
         env:
           TYPE: server
           CI: "Yes"
@@ -965,7 +967,7 @@ jobs:
           rc=0
           for p in ${{ inputs.pytest_paths }}; do
             echo "==== pytest $p"
-            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=short 2>&1 | tail -80 || rc=1
+            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=short 2>&1 | tee -a "$RUNNER_TEMP/pytest-output.log" | tail -80 || rc=1
           done
           exit $rc
 
@@ -986,7 +988,9 @@ jobs:
             exit 0
           fi
           node --version
-          node --test "${files[@]}"
+          # The log is read by the report below, which names the failing tests on the tracker issue (#2635).
+          set -o pipefail
+          node --test "${files[@]}" 2>&1 | tee "$RUNNER_TEMP/js-test-output.log"
 
       - name: Report to the fleet tracker (via the hub)
         # success() || failure() and not always(): a cancelled run (superseded
@@ -1009,10 +1013,38 @@ jobs:
           fi
           SUMMARY=""
           if [ "${{ job.status }}" != "success" ]; then
-            if [ -f /tmp/test-output.log ]; then
-              SUMMARY=$(tail -c 1400 /tmp/test-output.log)
-            else
-              SUMMARY="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
+            # What the tracker issue says: each suite's verdict and the failing tests by name, read from every log a
+            # suite wrote (scripts/ci_test_summary.py, #2635). The end of the server log was the prints of the last
+            # tests, written after unittest's verdict: on 2026-11-13 the theme's issue quoted test-site setup and no
+            # failing test, and a red `node --test` reported the end of a green server suite. The script runs isolated
+            # (-I) and without the report's secret in its environment. It never decides the report: when it cannot be
+            # fetched or fails, the end of the log as before.
+            # No server log means the server tests never ran (init, dependencies, install or build failed): that
+            # sentence comes first, whatever the JavaScript suite, which still runs, says after it.
+            before=""
+            if [ ! -f "$RUNNER_TEMP/test-output.log" ]; then
+              before="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
+            fi
+            logs=("$RUNNER_TEMP/test-output.log")
+            if [ "${{ inputs.pytest_blocking }}" = "true" ]; then
+              logs+=("$RUNNER_TEMP/pytest-output.log")
+            fi
+            logs+=("$RUNNER_TEMP/js-test-output.log")
+            first_log=""
+            for f in "${logs[@]}"; do
+              if [ -z "$first_log" ] && [ -f "$f" ]; then first_log="$f"; fi
+            done
+            if [ -n "$first_log" ]; then
+              if curl -sfL --retry 2 --max-time 20 -o "$RUNNER_TEMP/ci_test_summary.py" \
+                  https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/ci_test_summary.py; then
+                SUMMARY=$(timeout 60 env -u CI_SECRET python3 -I "$RUNNER_TEMP/ci_test_summary.py" --limit 1400 "${logs[@]}" 2>/dev/null) || SUMMARY=""
+              fi
+              if [ -z "$SUMMARY" ] && [ -z "$before" ]; then
+                SUMMARY=$(tail -c 1400 "$first_log")
+              fi
+            fi
+            if [ -n "$before" ]; then
+              if [ -n "$SUMMARY" ]; then SUMMARY="$before"$'\n'"$SUMMARY"; else SUMMARY="$before"; fi
             fi
           fi
           resp=$(curl -sS --max-time 20 -X POST \
@@ -1425,7 +1457,9 @@ jobs:
         run: |
           bench --site test_site set-config allow_tests true
           set -o pipefail
-          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee /tmp/test-output.log
+          # The log goes to $RUNNER_TEMP, the runner's folder for this job's files (emptied before every job), next to
+          # the logs of the JavaScript and pytest suites: the report step reads them all from there (#2635).
+          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee "$RUNNER_TEMP/test-output.log"
         env:
           TYPE: server
           CI: "Yes"
@@ -1438,7 +1472,7 @@ jobs:
           bench --site test_site set-config allow_tests true
           set -o pipefail
           bench --site test_site run-parallel-tests --app ${{ inputs.app }} \
-            --total-builds 1 --build-number 1 2>&1 | tee /tmp/test-output.log
+            --total-builds 1 --build-number 1 2>&1 | tee "$RUNNER_TEMP/test-output.log"
         env:
           TYPE: server
           CI: "Yes"
@@ -1453,7 +1487,7 @@ jobs:
           rc=0
           for p in ${{ inputs.pytest_paths }}; do
             echo "==== pytest $p"
-            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=short 2>&1 | tail -80 || rc=1
+            timeout 900 ../env/bin/python -m pytest "../apps/${{ inputs.app }}/$p" -q -p no:cacheprovider --tb=short 2>&1 | tee -a "$RUNNER_TEMP/pytest-output.log" | tail -80 || rc=1
           done
           exit $rc
 
@@ -1469,7 +1503,9 @@ jobs:
             exit 0
           fi
           node --version
-          node --test "${files[@]}"
+          # The log is read by the report below, which names the failing tests on the tracker issue (#2635).
+          set -o pipefail
+          node --test "${files[@]}" 2>&1 | tee "$RUNNER_TEMP/js-test-output.log"
 
       - name: Report to the fleet tracker (via the hub)
         if: (success() || failure()) && !startsWith(inputs.test_args, '--debug-records')
@@ -1482,10 +1518,38 @@ jobs:
           fi
           SUMMARY=""
           if [ "${{ job.status }}" != "success" ]; then
-            if [ -f /tmp/test-output.log ]; then
-              SUMMARY=$(tail -c 1400 /tmp/test-output.log)
-            else
-              SUMMARY="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
+            # What the tracker issue says: each suite's verdict and the failing tests by name, read from every log a
+            # suite wrote (scripts/ci_test_summary.py, #2635). The end of the server log was the prints of the last
+            # tests, written after unittest's verdict: on 2026-11-13 the theme's issue quoted test-site setup and no
+            # failing test, and a red `node --test` reported the end of a green server suite. The script runs isolated
+            # (-I) and without the report's secret in its environment. It never decides the report: when it cannot be
+            # fetched or fails, the end of the log as before.
+            # No server log means the server tests never ran (init, dependencies, install or build failed): that
+            # sentence comes first, whatever the JavaScript suite, which still runs, says after it.
+            before=""
+            if [ ! -f "$RUNNER_TEMP/test-output.log" ]; then
+              before="Échec AVANT les tests (init/dépendances/install/build) — lire le run."
+            fi
+            logs=("$RUNNER_TEMP/test-output.log")
+            if [ "${{ inputs.pytest_blocking }}" = "true" ]; then
+              logs+=("$RUNNER_TEMP/pytest-output.log")
+            fi
+            logs+=("$RUNNER_TEMP/js-test-output.log")
+            first_log=""
+            for f in "${logs[@]}"; do
+              if [ -z "$first_log" ] && [ -f "$f" ]; then first_log="$f"; fi
+            done
+            if [ -n "$first_log" ]; then
+              if curl -sfL --retry 2 --max-time 20 -o "$RUNNER_TEMP/ci_test_summary.py" \
+                  https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/ci_test_summary.py; then
+                SUMMARY=$(timeout 60 env -u CI_SECRET python3 -I "$RUNNER_TEMP/ci_test_summary.py" --limit 1400 "${logs[@]}" 2>/dev/null) || SUMMARY=""
+              fi
+              if [ -z "$SUMMARY" ] && [ -z "$before" ]; then
+                SUMMARY=$(tail -c 1400 "$first_log")
+              fi
+            fi
+            if [ -n "$before" ]; then
+              if [ -n "$SUMMARY" ]; then SUMMARY="$before"$'\n'"$SUMMARY"; else SUMMARY="$before"; fi
             fi
           fi
           resp=$(curl -sS --max-time 20 -X POST \

@@ -55,6 +55,11 @@ catalogues the way `bench compile-po-to-mo` does (`scripts/ci_light_change.py`, 
 doubt — no green run known, a forced push, a re-run, a list the API may have cut — runs the suite, and a skipped push
 reports nothing, so the next nightly still runs the whole suite on it.
 
+A red run's report names what failed: `scripts/ci_test_summary.py` reads the logs of the server suite, of the
+blocking pytest pass and of `node --test`, and the hub posts on the repository's `[CI]` issue each suite's verdict
+and its failing tests by name (never a traceback, an error message or a parameter). The end of the log is sent only
+when no failing test is found, or when the script cannot run.
+
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.
 
