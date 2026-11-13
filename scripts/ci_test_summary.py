@@ -68,6 +68,7 @@ _SPEC_SECTION = re.compile(r"^✖ failing tests:\s*$")
 _SPEC_AT = re.compile(r"^\s*test at (\S+)\s*$")
 _SPEC_FAIL = re.compile(r"^(\s*)✖ (.*?)(?: \([\d.]+m?s\))?\s*$")
 _SPEC_EXC = re.compile(r"^\s+([A-Z]\w*(?:Error|Exception|Failure))\b")
+_CLASS_NAME = re.compile(r"[A-Z]\w*")
 
 ASSERTION = "AssertionError"
 
@@ -265,7 +266,9 @@ def parse_node(lines: list[str]) -> Section | None:
             label = os.path.basename(name) if name.startswith("/") else name
             if meta.get("location"):
                 label = f"{_basename_location(meta['location'])} — {label}"
-            section.add("FAIL", label, meta.get("name", ""))
+            # The YAML's `name` is the error's class; anything else in it is a value and is not copied.
+            error = meta.get("name", "")
+            section.add("FAIL", label, error if _CLASS_NAME.fullmatch(error) else "")
         i = j + 1
 
     # spec (the default from Node 23, and Node 22 on a terminal): only its closing list, which names the failing

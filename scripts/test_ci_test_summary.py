@@ -282,6 +282,12 @@ class TestNode(Logs):
         )
         self.assertNothingCopied(out)
 
+    def test_a_tap_error_name_that_is_not_a_class_name_is_not_copied(self):
+        log = TAP_LOG.replace("name: 'TypeError'", "name: 'the value secret-value-7 is wrong'")
+        out = self.summary(log)
+        self.assertIn("- FAIL cards.test.js:20 — a card shows its title\n", out + "\n")
+        self.assertNotIn("secret-value", out)
+
     def test_spec_reads_the_closing_list(self):
         out = self.summary(SPEC_LOG)
         self.assertEqual(
