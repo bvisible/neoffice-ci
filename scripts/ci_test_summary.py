@@ -82,7 +82,8 @@ class Section:
         self.failures: OrderedDict[tuple[str, str], dict] = OrderedDict()
 
     def add(self, kind: str, name: str, detail: str = "", subtest: bool = False) -> None:
-        name = _short(name)
+        # Deduplicated on the whole name: two long names that start alike are two tests, cut only when shown.
+        name = " ".join(name.split())
         entry = self.failures.setdefault((kind, name), {"detail": "", "subtests": 0})
         if detail and detail != ASSERTION and not entry["detail"]:
             entry["detail"] = detail
@@ -92,7 +93,7 @@ class Section:
     def lines(self) -> list[str]:
         out = []
         for (kind, name), entry in self.failures.items():
-            line = f"- {kind} {name}"
+            line = f"- {kind} {_short(name)}"
             if entry["subtests"]:
                 n = entry["subtests"]
                 line += f" ({n} sous-test{'s' if n > 1 else ''})"

@@ -339,6 +339,16 @@ class TestBoundsAndLastResort(Logs):
         self.assertTrue(line.endswith("…"), line)
         self.assertLessEqual(len(line), ci_test_summary.NAME_LIMIT + len("- FAIL "))
 
+    def test_two_long_names_that_start_alike_stay_two_tests(self):
+        stem = "test_" + "y" * 200
+        log = "".join(
+            f"{SEP1}\nFAIL: {stem}_{end} (myapp.tests.test_long.TestLong.{stem}_{end})\n{SEP2}\nAssertionError\n"
+            for end in ("first", "second")
+        )
+        lines = self.summary(log).splitlines()
+        self.assertEqual(len(lines), 3, lines)  # the verdict line is missing in this log: header + two tests
+        self.assertEqual(lines[1], lines[2])  # both cut the same way when shown, and still counted as two
+
     def test_a_suite_killed_mid_run_gives_the_end_of_its_log(self):
         log = "\n".join(f"line {i} of a suite that never finished" for i in range(500)) + "\n"
         out = self.summary(log, limit=600)
