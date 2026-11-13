@@ -54,10 +54,8 @@ _EXC_LINE = re.compile(
 )
 
 _PY_FAIL = re.compile(r"^(FAILED|ERROR) (\S+?)(?: - (.*))?\s*$")
-_PY_TOTAL = re.compile(
-    r"^=*\s*((?:\d+ (?:failed|passed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun)(?:, )?)+)"
-    r" in [\d.]+s(?: \([\d:.]+\))?\s*=*\s*$"
-)
+# pytest's last line: counts of one or two words each, as a plugin adds its own (`473 subtests passed`, nora 13.11).
+_PY_TOTAL = re.compile(r"^=*\s*((?:\d+ [a-z]+(?: [a-z]+)?(?:, )?)+) in [\d.]+s(?: \([\d:.]+\))?\s*=*\s*$")
 _PY_EXC = re.compile(r"^(?:[A-Za-z_]\w*\.)*([A-Z]\w*(?:Error|Exception|Exit|Interrupt|Warning|Failure|Timeout))(?::|$)")
 
 _TAP_NOT_OK = re.compile(r"^(\s*)not ok \d+ - (.*?)\s*$")

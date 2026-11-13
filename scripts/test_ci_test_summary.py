@@ -320,6 +320,15 @@ class TestPytest(Logs):
         self.assertNothingCopied(out)
 
 
+    def test_a_plugins_count_does_not_hide_the_verdict(self):
+        # the last line of nora's red pytest pass on 2026-11-13 (pytest-subtests adds its own count)
+        last = "4 failed, 7336 passed, 1024 skipped, 157 warnings, 473 subtests passed in 154.75s (0:02:34)"
+        out = self.summary(PYTEST_LOG.replace("2 failed, 3 passed, 1 error in 4.56s", last))
+        self.assertTrue(
+            out.startswith("pytest : 4 failed, 7336 passed, 1024 skipped, 157 warnings, 473 subtests passed\n"), out
+        )
+
+
 class TestBoundsAndLastResort(Logs):
     def test_many_failures_keep_the_verdict_and_count_the_ones_left_out(self):
         blocks = "".join(
