@@ -299,6 +299,7 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
+          UPSTREAM: ${{ inputs.upstream_preview }}
           # A green run older than this is replayed even with no new commit, so drift
           # in the frappe/erpnext forks, the runner image or a dependency still gets
           # caught. One week: replaying every app weekly costs almost nothing.
@@ -306,6 +307,14 @@ jobs:
         run: |
           set +e
           decide() { echo "run=$1" >> "$GITHUB_OUTPUT"; echo "reason=$2" >> "$GITHUB_OUTPUT"; echo "$2"; echo "- **$2**" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+
+          # An upstream preview is a bench on UPSTREAM frappe/frappe and frappe/erpnext, which move every day on their
+          # own: neither the app's last green run nor bvisible/frappe tells whether they moved. Judged like the fork
+          # CI, the Monday previews of 16.11 were skipped and reported green with no test played (nora run 43809052995,
+          # erpnextswiss run 43808393271). The preview exists to be measured: it runs at every pass.
+          if [ "$UPSTREAM" = "true" ]; then
+            decide true "upstream preview: tested against upstream frappe/erpnext, which move on their own — always runs"
+          fi
 
           if [ "$EVENT" != "schedule" ] && [ "$EVENT" != "push" ]; then
             decide true "event is $EVENT — always runs (only scheduled runs and documentation-only pushes can be skipped)"
