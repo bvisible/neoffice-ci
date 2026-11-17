@@ -11,3 +11,9 @@
   entry: scripts/check_whitelist_permissions.py --base HEAD
   language: script
   types: [python]
+- id: check-dialogs
+  name: a new window follows the desk's model
+  description: A new or touched frappe.ui.Dialog declares its size and names its action by a verb; no veil or width made by hand (design system 6.18).
+  entry: scripts/check_dialogs.py --base HEAD
+  language: script
+  files: \.(js|ts|jsx|tsx|vue|html|css|scss)$

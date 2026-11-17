@@ -252,6 +252,40 @@ jobs:
             echo "::warning::the permission check could not be fetched: skipped"
           fi
 
+  # Every window of the desk is one model, drawn by our fork of Frappe (design system §6.18, 16.11.2026: 482 dialogs,
+  # 13 widths, 14 step bars for 16 wizards before it): a `frappe.ui.Dialog` with its size, one action named by its verb,
+  # never a veil or a width made by hand. Only the windows this push adds or touches are judged, so the stock blocks
+  # nobody until someone touches it, and the check says how to write a reason. A job of its own, like the one above: a
+  # refused window says nothing about the tests. No base, or a guard that cannot be fetched: it does not block.
+  # See scripts/check_dialogs.py.
+  dialogs:
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    name: a new window follows the desk's model (${{ inputs.app }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.app_ref || github.sha }}
+
+      - name: Read what this push adds
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          case "$BASE" in
+            ""|0000000000000000000000000000000000000000) echo "no base to compare with: skipped"; exit 0 ;;
+          esac
+          # --deepen: a merge of upstream in the range is told by the parents of its commits, a shallow history has none.
+          if ! git fetch -q --depth=1 origin "$BASE" || ! git fetch -q --deepen=300 origin "$GITHUB_SHA"; then
+            echo "::warning::the base $BASE could not be fetched: the window check is skipped"
+            exit 0
+          fi
+          if curl -sfL -o /tmp/check_dialogs.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_dialogs.py; then
+            python3 /tmp/check_dialogs.py --root . --base "$BASE"
+          else
+            echo "::warning::the window check could not be fetched: skipped"
+          fi
+
   # A nightly on an app nobody touched proves nothing and costs ~12 minutes of the
   # account's Actions allowance. This gate asks the hub what was last proven green
   # and skips the heavy job when the tree has not moved since. It asks the HUB and

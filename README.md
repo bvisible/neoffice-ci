@@ -49,6 +49,16 @@ nobody until someone touches it. At commit time, in `.pre-commit-config.yaml`:
       - id: check-whitelist-permissions
 ```
 
+The workflow also refuses a new or touched window of the desk that leaves its model (design system §6.18, drawn by
+our fork of Frappe): a `frappe.ui.Dialog` of more than four fields with no `size`, an action labelled « OK »,
+« Valider » or « Submit » where it should be named by its verb, a veil or a Bootstrap modal made by hand, a width set
+outside `size` (`scripts/check_dialogs.py`; its docstring gives the rules and how to write a reason). The stock blocks
+nobody until someone touches it, and `--inventory --json` lists it. At commit time, in `.pre-commit-config.yaml`:
+
+```yaml
+      - id: check-dialogs
+```
+
 A push whose files, since the last green run of its branch, are all documentation or translation catalogues
 (`*.md`, `docs/**`, `.claude/**`, `**/locale/*.po|pot`) does not run the heavy suite: a light job reads its
 catalogues the way `bench compile-po-to-mo` does (`scripts/ci_light_change.py`, `scripts/check_po_reads.py`). Any
