@@ -147,6 +147,47 @@ class ThePushedCommits(Repository):
         self.assertEqual(self.run_script("--days", "14").returncode, 1)
 
 
+class TheWeekOfWarnings(Repository):
+    """A pushed message cannot be corrected: before the day the repository names, a missing line is only said."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure(key_line_since="2026-11-18", key_line_blocks_from="2026-11-24")
+        self.base = self.commit("the rule gets its week of warnings", "2026-11-18T09:00:00")
+
+    def test_a_commit_made_before_that_day_is_said_as_a_warning_and_does_not_fail_the_run(self):
+        sha = self.change(WATCHED, "feat(reading): a new prompt", "2026-11-23T23:00:00")
+        done = self.push()
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertRegex(done.stdout, rf"^::warning::{sha[:10]} « feat\(reading\): a new prompt » touches")
+        self.assertIn("A commit made from 2026-11-24 on without its key line is refused.", done.stdout)
+        self.assertIn("1 commit(s) made before 2026-11-24 without their key line: said, not refused.", done.stdout)
+
+    def test_a_commit_made_from_that_day_on_is_refused(self):
+        self.change(WATCHED, "feat(reading): warned", "2026-11-23T10:00:00")
+        sha = self.change(WATCHED, "feat(reading): refused", "2026-11-24T00:30:00")
+        done = self.push()
+        self.assertEqual(done.returncode, 1)
+        self.assertRegex(done.stdout, rf"(?m)^{sha[:10]} « feat\(reading\): refused »")
+        self.assertEqual(done.stdout.count("::warning::"), 1)
+
+    def test_the_gate_before_a_commit_refuses_from_the_first_day(self):
+        done = self.gate("feat(reading): a new prompt\n", WATCHED)
+        self.assertEqual(done.returncode, 1)
+        self.assertNotIn("::warning::", done.stdout)
+
+    def test_a_commit_with_its_line_is_neither_warned_nor_refused(self):
+        self.change(WATCHED, "feat(reading): a line per rate\n\nKey: scan_split_by_rate", "2026-11-20T10:00:00")
+        done = self.push()
+        self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+    def test_a_day_that_is_not_a_day_fails_the_run(self):
+        self.configure(key_line_since="2026-11-18", key_line_blocks_from="next week")
+        done = self.push()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("`key_line_blocks_from` is a day", done.stdout)
+
+
 class NotStarted(Repository):
     def test_without_the_configuration_or_its_starting_day_nothing_is_judged(self):
         self.change(WATCHED, "feat(reading): a new prompt")

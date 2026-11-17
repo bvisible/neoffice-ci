@@ -34,6 +34,7 @@ OWN_WORDS = """
     def skip(once, disable, supplier, amount, currency):
         return once
 """
+NATURES = 'NATURES = ("repas", "restaurant", "verpflegung", "mahlzeit", "pasto")\n'
 
 
 class Repository(unittest.TestCase):
@@ -54,11 +55,11 @@ class Repository(unittest.TestCase):
         return config
 
     def found(self):
-        return lists.lists_of(self.root, self.configure())
+        return lists.lists_of(self.root, self.configure())[0]
 
     def refused(self):
         config = self.configure()
-        return lists.judge(lists.lists_of(self.root, config), config)
+        return lists.judge(*lists.lists_of(self.root, config), config)
 
     def run_script(self, *args):
         self.configure()
@@ -67,17 +68,23 @@ class Repository(unittest.TestCase):
         )
 
     def declare(self, entry, **fields):
+        """Declares a list the check found (or printed with --declare), accepted unless the fields say otherwise."""
         declaration = {
             "path": entry["path"],
             "name": entry["name"],
-            "fingerprint": entry["fingerprint"],
             "kind": "anchor",
             "why": "finds the line of the total printed on a receipt",
+            "members": entry["members"],
             "accepted_by": "the owner",
             "accepted_on": "2026-11-18",
         }
         declaration.update(fields)
-        self.declared.append(declaration)
+        self.declared.append({key: value for key, value in declaration.items() if value is not None})
+
+    def inherit(self, entry, **fields):
+        self.declare(
+            entry, accepted_by=None, accepted_on=None, **{"inherited_on": "2026-11-17", "until": "#312", **fields}
+        )
 
 
 class WhatIsFound(Repository):
@@ -136,6 +143,18 @@ class WhatIsFound(Repository):
         )
         self.assertEqual(self.found(), [])
 
+    def test_a_text_of_several_lines_is_prose_not_a_pattern(self):
+        self.write(
+            "app/api/reading.py",
+            '''
+            PROMPT = """You read a document.
+            "document_type": "facture|quittance|relevé"
+            Keep every printed line."""
+            ONE_LINE = "facture|quittance|relevé"
+            ''',
+        )
+        self.assertEqual([entry["name"] for entry in self.found()], ["ONE_LINE"])
+
     def test_javascript_lists_patterns_and_tests_are_found_and_comments_are_not(self):
         self.watched.append({"path": "app/public/js/window.js", "why": "the booking window"})
         self.write(
@@ -159,43 +178,92 @@ class WhatIsFound(Repository):
         self.write("app/tests/reading_x.py", STOPGAP)
         self.assertEqual(self.found(), [])
 
+    def test_the_members_of_a_list_are_every_string_of_it_whatever_the_code_calls_technical(self):
+        self.write("app/api/reading.py", NATURES)
+        self.write("app/other.py", "restaurant = 1\n")
+        (entry,) = self.found()
+        self.assertNotIn("restaurant", entry["words"], "a name of the code is not an everyday word")
+        self.assertEqual(entry["members"], ["repas", "restaurant", "verpflegung", "mahlzeit", "pasto"])
+
 
 class TheRegistry(Repository):
     def setUp(self):
         super().setUp()
-        self.write("app/api/reading.py", 'TOTAL_WORDS = ("rechnungsbetrag", "importo totale", "montant dû")\n')
+        self.write("app/api/reading.py", NATURES)
         (self.entry,) = self.found()
 
-    def test_a_declared_list_passes(self):
+    def test_a_declared_list_passes_accepted_or_inherited(self):
         self.declare(self.entry)
         self.assertEqual(self.refused(), [])
+        self.declared = []
+        self.inherit(self.entry, kind="decides", why="chooses the account of a receipt by the name of the accounts")
+        self.assertEqual(self.refused(), [])
 
-    def test_one_more_word_in_a_declared_list_is_refused_until_it_is_accepted_again(self):
-        self.declare(self.entry)
-        self.write("app/api/reading.py", 'TOTAL_WORDS = ("rechnungsbetrag", "importo totale", "montant dû", "solde")\n')
+    def test_one_more_word_in_a_declared_list_is_refused_and_named(self):
+        self.inherit(self.entry)
+        self.write("app/api/reading.py", NATURES.replace('"pasto"', '"pasto", "cantine"'))
         (refusal,) = self.refused()
-        self.assertIn("the declared list changed", refusal)
-        self.assertIn("solde", refusal)
+        self.assertIn("the declared list grew by 1 word(s): cantine", refusal)
+        self.assertIn("app/api/reading.py:1: NATURES", refusal)
 
-    def test_a_declaration_that_matches_nothing_any_more_is_refused(self):
-        self.declare(self.entry)
-        self.write("app/api/reading.py", "TOTAL_WORDS = ()\n")
+    def test_a_new_literal_of_words_under_a_declared_name_is_growth_too(self):
+        self.write("app/api/reading.py", "def nature(text):\n    return text.startswith('repas')\n")
+        (entry,) = self.found()
+        self.declared = []
+        self.inherit(entry)
+        self.assertEqual(self.refused(), [])
+        self.write(
+            "app/api/reading.py",
+            "def nature(text):\n    if 'verpflegung' in text:\n        return 1\n    return text.startswith('repas')\n",
+        )
         (refusal,) = self.refused()
-        self.assertIn("declared but no such list exists any more", refusal)
+        self.assertIn("grew by 1 word(s): verpflegung", refusal)
 
-    def test_a_declaration_says_what_why_who_and_when(self):
+    def test_a_declared_list_may_lose_words_freely(self):
+        self.inherit(self.entry)
+        self.write("app/api/reading.py", 'NATURES = ("repas", "verpflegung", "mahlzeit")\n')
+        self.assertEqual(self.refused(), [])
+        self.write("app/api/reading.py", "NATURES = ()\n")
+        self.assertEqual(self.refused(), [], "an emptied list keeps its name: nothing to refuse")
+
+    def test_names_used_elsewhere_in_the_repository_never_make_a_declared_list_grow_or_vanish(self):
+        self.inherit(self.entry)
+        self.write("app/other.py", "def repas(verpflegung, mahlzeit, pasto):\n    return pasto\n")
+        self.assertEqual(self.found(), [], "every word became a name of the code: no list is seen any more")
+        self.assertEqual(self.refused(), [], "and the declaration is not refused for it")
+        (self.root / "app/other.py").unlink()
+        self.write("app/elsewhere.py", "x = 1\n")
+        self.assertEqual(self.refused(), [], "the name stops being technical: the word was a declared member")
+        self.assertIn("restaurant", self.entry["members"])
+
+    def test_a_declaration_whose_file_or_name_is_gone_is_refused(self):
+        self.inherit(self.entry)
+        self.write("app/api/reading.py", 'KINDS_OF_MEAL = ("x",)\n')
+        (refusal,) = self.refused()
+        self.assertIn("is declared but this file or this name no longer exists", refusal)
+        (self.root / "app/api/reading.py").unlink()
+        (refusal,) = self.refused()
+        self.assertIn("no longer exists", refusal)
+
+    def test_a_declaration_says_what_why_its_members_and_who_accepted_it_or_when_it_was_found(self):
         for fields, expected in (
             ({"kind": "fine"}, "`kind` is one of"),
             ({"why": "it is fine"}, "`why` says in at least"),
+            ({"members": []}, "`members` holds the words"),
+            ({"members": None}, "`members` holds the words"),
             ({"accepted_by": " "}, "`accepted_by` names who accepted it"),
             ({"accepted_on": "yesterday"}, "`accepted_on` is the day"),
             ({"kind": "decides"}, "names in `until` the issue that removes it"),
+            ({"accepted_by": None, "accepted_on": None, "inherited_on": "2026-11-17"}, "the issue that follows it"),
+            ({"accepted_on": None, "inherited_on": "2026-11-17", "until": "#312"}, "inherited or accepted, not both"),
+            ({"accepted_by": None, "inherited_on": "17.11.2026", "until": "#312"}, "`inherited_on` is the day"),
         ):
             with self.subTest(fields=fields):
                 self.declared = []
                 self.declare(self.entry, **fields)
-                (refusal,) = self.refused()
-                self.assertIn(expected, refusal)
+                refused = self.refused()
+                self.assertEqual(len([line for line in refused if "is incomplete" in line]), 1, refused)
+                self.assertIn(expected, " ".join(refused))
         self.declared = []
         self.declare(self.entry, kind="decides", until="#2788")
         self.assertEqual(self.refused(), [])
@@ -223,18 +291,32 @@ class TheCommand(Repository):
         self.assertIn("PART_KINDS", refused.stdout)
         (todo,) = json.loads(self.run_script("--declare").stdout)
         self.assertEqual((todo["kind"], todo["why"], todo["accepted_by"]), ("", "", ""))
-        self.declare(todo, kind="support")
+        self.assertEqual(todo["members"][:3] + todo["members"][-2:], ["caisse", "caisses", "palette", "emballage", "verpackung"])
+        self.inherit(todo, kind="decides", why="chooses the account of a part by the words of its lines")
         accepted = self.run_script()
         self.assertEqual((accepted.returncode, accepted.stdout), (0, ""))
         self.assertEqual(json.loads(self.run_script("--declare").stdout), [])
 
+    def test_a_list_that_grew_comes_back_in_the_declarations_to_write(self):
+        self.write("app/api/reading.py", NATURES)
+        (todo,) = json.loads(self.run_script("--declare").stdout)
+        self.inherit(todo)
+        self.write("app/api/reading.py", NATURES.replace('"pasto"', '"pasto", "cantine"'))
+        (again,) = json.loads(self.run_script("--declare").stdout)
+        self.assertIn("cantine", again["members"])
+
     def test_the_inventory_lists_and_refuses_nothing(self):
         self.write("app/api/reading.py", STOPGAP)
+        self.write("app/api/reading_two.py", NATURES)
+        entry = next(found for found in self.found() if found["name"] == "NATURES")
+        self.inherit(entry, kind="decides")
         done = self.run_script("--inventory")
         self.assertEqual(done.returncode, 0)
-        self.assertIn("NOT DECLARED", done.stdout)
-        (entry,) = json.loads(self.run_script("--inventory", "--json").stdout)
-        self.assertEqual(entry["name"], "PART_KINDS")
+        self.assertIn("PART_KINDS [NOT DECLARED]", done.stdout)
+        self.assertIn("NATURES [inherited decides]", done.stdout)
+        self.assertIn("2 list(s) in the watched paths: 0 accepted, 1 inherited, 1 not declared", done.stdout)
+        names = [found["name"] for found in json.loads(self.run_script("--inventory", "--json").stdout)]
+        self.assertEqual(names, ["PART_KINDS", "NATURES"])
 
     def test_at_commit_time_it_judges_only_when_a_watched_file_or_the_configuration_is_given(self):
         self.write("app/api/reading.py", STOPGAP)

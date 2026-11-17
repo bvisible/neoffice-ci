@@ -61,13 +61,16 @@ nobody until someone touches it, and `--inventory --json` lists it. At commit ti
 
 In a repository that holds a `.decision-paths.json` (the paths where its assistant decides, each with its reason), the
 workflow refuses a list of everyday words that decides in the assistant's place: a tuple, a table, a pattern with
-alternatives or a single word looked for in a text, in a watched file, that is not declared in that file with what it
-does, why it may stay, who accepted it and when; a declared list that gained a word is refused until it is accepted
-again (`scripts/check_word_lists.py`; `--inventory` lists the stock, `--declare` prints the declarations to write).
-The stock is judged too: an old list is the model the next one is copied from. It also refuses a commit that touches
-such a path and does not name the site key that guards the change (`scripts/check_key_line.py`: `Key: <site key>`, or
-`Key: none, <why nothing changes for a customer>, reviewed by <who>`; it starts on the day `key_line_since` names).
-A repository without the file sees nothing change. At commit time, in `.pre-commit-config.yaml`:
+alternatives or a single word looked for in a text, in a watched file, that is not declared in that file with its
+members, what it does and why it is there. A declaration is accepted (who, when) or inherited (the stock found the day
+the repository opted in, which nobody accepted, with the issue that follows it); either way the list is frozen: a
+declared list that gains a word is refused, it may lose words freely (`scripts/check_word_lists.py`; `--inventory`
+lists the stock, `--declare` prints the declarations to write). The stock is judged too: an old list is the model the
+next one is copied from. The workflow also reads the commits that touch such a path: each names the site key that
+guards the change (`scripts/check_key_line.py`: `Key: <site key>`, or `Key: none, <why nothing changes for a
+customer>, reviewed by <who>`), from the day `key_line_since` names; a commit made before `key_line_blocks_from` is
+only said as a warning, since a pushed message can no longer be corrected. A repository without the file sees nothing
+change. At commit time, in `.pre-commit-config.yaml`:
 
 ```yaml
       - id: check-word-lists

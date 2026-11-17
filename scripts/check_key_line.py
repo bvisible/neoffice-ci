@@ -23,11 +23,17 @@ It cannot prove that the code changed really sits behind the key it names: only 
 does. The line makes the author ask the question and leaves a trace a reader can check.
 Merges are not judged (a merge of upstream brings their commits), nor a commit made before `key_line_since`.
 
+A message can be corrected before the commit, not after the push. So the gate before a commit (--message) refuses
+from the first day, and a repository may give the pushed commits a period of warnings: with
+`"key_line_blocks_from": "YYYY-MM-DD"`, a commit made before that day and found without its line is only said, as a
+warning annotation (`::warning::`); a commit made from that day on is refused.
+
     check_key_line.py --message FILE [--files f ...] the gate before a commit: this message, and these files or,
                                                      without --files (a commit-msg hook), the staged ones
     check_key_line.py --base REV [--root DIR]        every commit of REV..HEAD (a push)
     check_key_line.py --days N [--root DIR]          every commit of the last N days (the default, 14): a commit
                                                      pushed without its line keeps the check red until it is repaired
+                                                     (or is only warned about, before `key_line_blocks_from`)
 
 Exit 1 when a commit is refused.
 """
@@ -44,6 +50,7 @@ from pathlib import Path
 
 CONFIG = ".decision-paths.json"
 MIN_REASON = 20
+DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 KEY_NAME = re.compile(r"[a-z][a-z0-9_]{3,}")
 NONE = re.compile(r"none\s*,\s*(?P<why>.+?)\s*,\s*reviewed by\s+(?P<who>\S.*)", re.IGNORECASE)
 KEY_LINE = re.compile(r"^Key:\s*(?P<value>\S.*)$", re.MULTILINE)
@@ -113,9 +120,13 @@ def main() -> int:
         print(f"{CONFIG} is not valid JSON: {error}")
         return 1
     since = str(config.get("key_line_since") or "")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+    if not DAY.fullmatch(since):
         print(f"{CONFIG} names no `key_line_since` day: the key line has not started here")
         return 0
+    blocks_from = str(config.get("key_line_blocks_from") or "")
+    if blocks_from and not DAY.fullmatch(blocks_from):
+        print(f"{CONFIG}: `key_line_blocks_from` is a day (YYYY-MM-DD), not « {blocks_from} »")
+        return 1
 
     if args.message:
         names = args.files or git(root, "diff", "--cached", "--name-only").split("\n")
@@ -135,9 +146,10 @@ def main() -> int:
         for found in REPAIR_LINE.finditer(git(root, "log", "-1", "--format=%B", sha)):
             if not flaw(root, found.group("value"), "HEAD"):
                 repairs.append(found.group("sha"))
-    refused = 0
+    refused = warned = 0
     for sha in reversed(judged):
-        if git(root, "log", "-1", "--format=%cs", sha).strip() < since:
+        made = git(root, "log", "-1", "--format=%cs", sha).strip()
+        if made < since:
             continue
         names = git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha).split("\n")
         touched = [name for name in names if name and is_watched(config, name)]
@@ -145,9 +157,16 @@ def main() -> int:
             continue
         why = verdict(root, git(root, "log", "-1", "--format=%B", sha), "HEAD")
         if why:
-            refused += 1
             subject = git(root, "log", "-1", "--format=%s", sha).strip()
-            print(f"{sha[:10]} « {subject[:80]} » touches {touched[0]}: {why}.")
+            line = f"{sha[:10]} « {subject[:80]} » touches {touched[0]}: {why}."
+            if blocks_from and made < blocks_from:
+                warned += 1
+                print(f"::warning::{line} A commit made from {blocks_from} on without its key line is refused.")
+            else:
+                refused += 1
+                print(line)
+    if warned:
+        print(f"{warned} commit(s) made before {blocks_from} without their key line: said, not refused.")
     if refused:
         print(
             f"\n{refused} commit(s) without the key that guards them. A pushed commit is not rewritten: add, in a "
