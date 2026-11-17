@@ -56,6 +56,59 @@ class TestWhatIsLight(unittest.TestCase):
             self.assertFalse(lc.is_light(p), p)
 
 
+class TestTheFoldersACallerNames(unittest.TestCase):
+    """`--also-light`: the trial pages of neoffice-devops (17.11.2026), and nothing a caller did not name."""
+
+    PAGES = ("neoffice_devops/feature_review/pages/",)
+
+    def test_a_named_folder_is_light_and_nothing_beside_it(self):
+        self.assertTrue(lc.is_light("neoffice_devops/feature_review/pages/site-x.json", self.PAGES))
+        self.assertFalse(lc.is_light("neoffice_devops/feature_review/pages/site-x.json"))
+        self.assertFalse(lc.is_light("neoffice_devops/feature_review/service.py", self.PAGES))
+        self.assertFalse(lc.is_light("neoffice_devops/feature_review/pages.py", self.PAGES))
+
+    def test_only_relative_folders_are_taken(self):
+        self.assertEqual(lc.also_light(" a/b/ , c/,a/b/"), ("a/b/", "c/"))
+        for bad in ("", "a", "/etc/", "../x/", "a/../b/", "./a/", "/", ".github/"):
+            self.assertEqual(lc.also_light(bad), (), bad)
+
+    def test_a_page_beside_code_still_runs_the_suite(self):
+        light, reason, _ = lc.judge_comparison(
+            comparison("neoffice_devops/feature_review/pages/a.json", "neoffice_devops/hooks.py"), self.PAGES
+        )
+        self.assertFalse(light)
+        self.assertIn("neoffice_devops/hooks.py", reason)
+
+    def test_pages_and_documentation_alone_are_light_and_say_so(self):
+        light, reason, po = lc.judge_comparison(
+            comparison("neoffice_devops/feature_review/pages/a.json", "docs/x.md"), self.PAGES
+        )
+        self.assertTrue(light, reason)
+        self.assertIn("and neoffice_devops/feature_review/pages/ changed (2 file(s), 1 there)", reason)
+        self.assertEqual(po, [])
+
+    def test_a_page_moved_out_of_the_code_is_not_light(self):
+        moved = {
+            "filename": "neoffice_devops/feature_review/pages/a.json",
+            "previous_filename": "neoffice_devops/feature_review/a.py",
+            "status": "renamed",
+        }
+        self.assertFalse(lc.judge_comparison(comparison(moved), self.PAGES)[0])
+
+    def test_the_option_reaches_decide_from_the_command_line(self):
+        out = io.StringIO()
+        with mock.patch.object(lc, "_get", return_value=comparison("neoffice_devops/feature_review/pages/a.json")), \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": "", "GITHUB_TOKEN": "t"}), redirect_stdout(out):
+            lc.main(["decide", "--repo", "bvisible/neoffice-devops", "--base", GREEN, "--head", HEAD,
+                     "--also-light", "neoffice_devops/feature_review/pages/"])
+        self.assertIn("light=true", out.getvalue())
+        out = io.StringIO()
+        with mock.patch.object(lc, "_get", return_value=comparison("neoffice_devops/feature_review/pages/a.json")), \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": "", "GITHUB_TOKEN": "t"}), redirect_stdout(out):
+            lc.main(["decide", "--repo", "bvisible/neoffice-devops", "--base", GREEN, "--head", HEAD])
+        self.assertIn("light=false", out.getvalue())
+
+
 class TestTheVerdictOnAComparison(unittest.TestCase):
     def test_documentation_only_is_light_and_names_the_catalogues_to_read(self):
         light, reason, po = lc.judge_comparison(comparison("docs/a.md", "neoffice_theme/locale/fr.po"))

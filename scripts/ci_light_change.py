@@ -7,20 +7,24 @@ neoffice-devops paid its twenty minutes, a hand-fixed French catalogue of the th
 are all light is now told apart:
 
   * any Markdown file (`*.md`), anything under `docs/` or `.claude/`;
-  * a translation catalogue of the app, `<anything>/locale/<name>.po` or `.pot`.
+  * a translation catalogue of the app, `<anything>/locale/<name>.po` or `.pot`;
+  * anything under a folder the calling workflow names with `--also-light` (17.11.2026: the trial pages of
+    neoffice-devops, `neoffice_devops/feature_review/pages/`, JSON that no test and no running code reads, pushed by
+    every session several times an hour: 57 of its 127 pushes of 16 and 17.11 changed nothing else, and each paid
+    the twenty minutes of the suite while the head of main waited for a verdict behind them).
 
 The range is NOT the push's own `before..sha`. It runs from the head of the LAST GREEN run of the branch: pushes
 cancel each other's runs (a newer push supersedes the run of the previous one), so a code commit whose run was
 cancelled, or which went red, is still in the range of the next push, and that push runs the suite. A head that is
 red stays red until a full run says otherwise.
 
-  ci_light_change.py decide --repo OWNER/NAME --base SHA --head SHA
+  ci_light_change.py decide --repo OWNER/NAME --base SHA --head SHA [--also-light DIR/,DIR/]
         compares base...head through the GitHub API (GITHUB_TOKEN from the environment) and prints
         `light=true|false`, `reason=<one line>` and `po=<JSON list of the catalogues to read>`;
         appends the same lines to $GITHUB_OUTPUT when it is set.
   ci_light_change.py last-success --repo OWNER/NAME --workflow FILE.yml --branch BRANCH
         prints the head sha of the last successful push run of that workflow on that branch (empty when none).
-  ci_light_change.py classify < paths.txt
+  ci_light_change.py classify [--also-light DIR/,DIR/] < paths.txt
         the same rule on a list of paths, one per line (by hand, and for the tests).
 
 It never fails a run and it never guesses: no base, a base that is not an ancestor of the head (a forced push),
@@ -45,14 +49,30 @@ ZERO = "0" * 40
 _CATALOGUE = re.compile(r"(^|/)locale/[^/]+\.pot?$")
 
 
-def is_light(path: str) -> bool:
-    """A path whose content no build reads and no heavy test needs: documentation or a translation catalogue."""
+def also_light(value: str) -> tuple[str, ...]:
+    """The folders of `--also-light` (comma separated): only relative folder paths, each ending with `/`.
+
+    Anything else is dropped rather than trusted (an absolute path, a `..`, a bare name that would make every path
+    beginning with it light): the doubt stays on the side of the suite."""
+    out = []
+    for part in (value or "").split(","):
+        p = part.strip()
+        if p and p.endswith("/") and not p.startswith(("/", ".")) and ".." not in p.split("/") and len(p) > 1:
+            out.append(p)
+    return tuple(dict.fromkeys(out))
+
+
+def is_light(path: str, also: tuple[str, ...] = ()) -> bool:
+    """A path whose content no build reads and no heavy test needs: documentation, a translation catalogue, or a
+    file under one of the folders the caller named (`also`)."""
     p = (path or "").strip()
     if not p:
         return False
     if p.lower().endswith(".md"):
         return True
     if p.startswith(("docs/", ".claude/")):
+        return True
+    if also and p.startswith(also):
         return True
     return bool(_CATALOGUE.search(p))
 
@@ -61,20 +81,24 @@ def is_catalogue(path: str) -> bool:
     return bool(_CATALOGUE.search((path or "").strip()))
 
 
-def classify(paths: list[str]) -> tuple[bool, str, list[str]]:
+def classify(paths: list[str], also: tuple[str, ...] = ()) -> tuple[bool, str, list[str]]:
     """(light, reason, catalogues to read) for a list of changed paths."""
     paths = [p.strip() for p in paths if p and p.strip()]
     if not paths:
         return False, "no changed file to judge", []
-    heavy = [p for p in paths if not is_light(p)]
+    heavy = [p for p in paths if not is_light(p, also)]
     if heavy:
         more = f" and {len(heavy) - 3} more" if len(heavy) > 3 else ""
         return False, f"{len(heavy)} file(s) beyond documentation and translations ({', '.join(heavy[:3])}{more})", []
     po = sorted({p for p in paths if is_catalogue(p)})
+    named = sum(1 for p in paths if also and p.startswith(also))
+    if named:
+        folders = ", ".join(also)
+        return True, f"only documentation, translations and {folders} changed ({len(paths)} file(s), {named} there)", po
     return True, f"only documentation and translations changed ({len(paths)} file(s))", po
 
 
-def judge_comparison(payload: dict | None) -> tuple[bool, str, list[str]]:
+def judge_comparison(payload: dict | None, also: tuple[str, ...] = ()) -> tuple[bool, str, list[str]]:
     """The verdict on a GitHub comparison (`GET /repos/{repo}/compare/{base}...{head}`)."""
     if not isinstance(payload, dict):
         return False, "the comparison could not be read", []
@@ -96,7 +120,7 @@ def judge_comparison(payload: dict | None) -> tuple[bool, str, list[str]]:
             paths.append(f["previous_filename"])
         if f.get("status") == "removed":
             removed.add(name)
-    light, reason, po = classify(paths)
+    light, reason, po = classify(paths, also)
     return light, reason, [p for p in po if p not in removed]
 
 
@@ -129,7 +153,7 @@ def _valid_repo(s: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", s or ""))
 
 
-def decide(repo: str, base: str, head: str, token: str) -> tuple[bool, str, list[str]]:
+def decide(repo: str, base: str, head: str, token: str, also: tuple[str, ...] = ()) -> tuple[bool, str, list[str]]:
     if not _valid_repo(repo):
         return False, "no repository to compare in", []
     if not _valid_sha(base):
@@ -140,7 +164,7 @@ def decide(repo: str, base: str, head: str, token: str) -> tuple[bool, str, list
         return False, "the head is the last green commit itself: nothing to compare", []
     if not token:
         return False, "no token to read the comparison", []
-    return judge_comparison(_get(f"/repos/{repo}/compare/{base}...{head}", token))
+    return judge_comparison(_get(f"/repos/{repo}/compare/{base}...{head}", token), also)
 
 
 def last_success(repo: str, workflow: str, branch: str, token: str) -> str:
@@ -171,11 +195,12 @@ def main(argv: list[str]) -> int:
     for i in range(0, len(args) - 1, 2):
         opts[args[i].lstrip("-")] = args[i + 1]
     token = os.environ.get("GITHUB_TOKEN", "")
+    also = also_light(opts.get("also-light", ""))
     try:
         if cmd == "classify":
-            _emit(*classify(sys.stdin.read().splitlines()))
+            _emit(*classify(sys.stdin.read().splitlines(), also))
         elif cmd == "decide":
-            _emit(*decide(opts.get("repo", ""), opts.get("base", ""), opts.get("head", ""), token))
+            _emit(*decide(opts.get("repo", ""), opts.get("base", ""), opts.get("head", ""), token, also))
         elif cmd == "last-success":
             print(last_success(opts.get("repo", ""), opts.get("workflow", ""), opts.get("branch", ""), token))
         else:
