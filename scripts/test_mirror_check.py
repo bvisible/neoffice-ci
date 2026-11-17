@@ -59,6 +59,13 @@ class TestTheMirrorCheck(unittest.TestCase):
         )
         self.assertEqual(code, 0, said)
 
+    def test_the_inputs_of_a_run_started_by_hand_may_stay_out_of_the_preview(self):
+        hand = "      test_args: ${{ inputs.test_args || '' }}\n      verbose: ${{ inputs.verbose || false }}\n"
+        code, said = self.run_check(
+            call("Tests", extra=hand), call("Upstream preview", extra="      upstream_preview: true\n")
+        )
+        self.assertEqual(code, 0, said)
+
     def test_an_input_the_preview_lacks_is_stopped(self):
         code, said = self.run_check(
             call("Tests", apps="erpnext,payments,neoffice_wizard"),

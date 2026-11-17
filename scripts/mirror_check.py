@@ -17,10 +17,11 @@ Twice in one day, 2026-09-10:
   instead of `_Test Company`). 24 tests reported as "the cost of the upgrade";
   every one of them was ours.
 
-Two inputs are allowed to differ, and only these:
+Three inputs are allowed to differ, and only these:
 
 * `upstream_preview` -- the flag that makes it a preview at all;
-* `test_args` -- a `workflow_dispatch` input the preview does not expose.
+* `test_args` and `verbose` -- `workflow_dispatch` inputs of a run started by hand, which the preview does not
+  expose (`verbose` writes the reason of each skip, maintenance#1070): a push passes neither.
 
 Every secret the tests are given, the preview must be given too (2026-11-09): the theme's
 preview had the tests' apps but was given `CI_REPORT_SECRET` alone where the tests inherit
@@ -37,7 +38,7 @@ from pathlib import Path
 
 NORMAL = Path(".github/workflows/tests.yml")
 PREVIEW = Path(".github/workflows/upstream-preview.yml")
-ALLOWED_TO_DIFFER = {"upstream_preview", "test_args"}
+ALLOWED_TO_DIFFER = {"upstream_preview", "test_args", "verbose"}
 
 
 def caller_inputs(path: Path) -> dict[str, str] | None:

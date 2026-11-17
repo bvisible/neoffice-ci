@@ -29,10 +29,18 @@ on:
         type: string
         default: "3.12"
       test_args:
-        description: "Extra args appended to bench run-tests (debug switch, e.g. --verbose)"
+        description: "Extra args appended to bench run-tests (e.g. --failfast; --verbose is not one of them: see `verbose`)"
         required: false
         type: string
         default: ""
+      verbose:
+        # `--verbose` is an option of bench itself, read before `--site`: run-tests refuses it (« No such option ») and
+        # test_args puts it after. With it the server suite writes one line per test, and the reason of each skip, which
+        # the default output never says: the only way to count the skips by cause on the CI's own site (maintenance#1070).
+        description: "One line per server test and the reason of each skip (bench --verbose run-tests)"
+        required: false
+        type: boolean
+        default: false
       app_ref:
         description: "Git ref of the app to test instead of the calling sha (a PR branch tested from version-15's workflow file)"
         type: string
@@ -1023,7 +1031,7 @@ jobs:
           set -o pipefail
           # The log goes to $RUNNER_TEMP, the runner's folder for this job's files (emptied before every job), next to
           # the logs of the JavaScript and pytest suites: the report step reads them all from there (#2635).
-          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+          bench ${{ inputs.verbose && '--verbose' || '' }} --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee "$RUNNER_TEMP/test-output.log"
         env:
           TYPE: server
           CI: "Yes"
@@ -1551,7 +1559,7 @@ jobs:
           set -o pipefail
           # The log goes to $RUNNER_TEMP, the runner's folder for this job's files (emptied before every job), next to
           # the logs of the JavaScript and pytest suites: the report step reads them all from there (#2635).
-          bench --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+          bench ${{ inputs.verbose && '--verbose' || '' }} --site test_site run-tests --app ${{ inputs.app }} ${{ inputs.test_args }} 2>&1 | tee "$RUNNER_TEMP/test-output.log"
         env:
           TYPE: server
           CI: "Yes"
