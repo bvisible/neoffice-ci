@@ -187,18 +187,63 @@ class TestDecideNeverGuesses(unittest.TestCase):
         self.assertEqual(json.loads(next(x for x in lines if x.startswith("po="))[3:]), ["app/locale/fr.po"])
 
 
+def wrun(rid, status="completed", conclusion="success", sha=GREEN):
+    return {"id": rid, "status": status, "conclusion": conclusion if status == "completed" else None, "head_sha": sha}
+
+
 class TestTheLastGreenRun(unittest.TestCase):
-    def test_it_reads_the_head_of_the_last_successful_push_run(self):
-        with mock.patch.object(lc, "_get", return_value={"workflow_runs": [{"head_sha": GREEN}]}) as get:
-            self.assertEqual(lc.last_success("bvisible/neoffice-devops", "ci.yml", "main", "t"), GREEN)
-        path = get.call_args[0][0]
+    OLDER = "c" * 40
+
+    def last(self, *answers, current=500):
+        with mock.patch.object(lc, "_get", side_effect=list(answers)) as get, \
+                mock.patch.object(lc.time, "sleep") as sleep:
+            sha = lc.last_success("bvisible/neoffice-devops", "ci.yml", "main", "t", current=current, waits=(10, 10))
+        self.get, self.sleep = get, sleep
+        return sha
+
+    def test_it_reads_the_newest_green_push_run_older_than_this_one(self):
+        runs = [wrun(502, "pending"), wrun(500, "in_progress"), wrun(499, conclusion="cancelled"), wrun(498), wrun(490, sha=self.OLDER)]
+        self.assertEqual(self.last({"workflow_runs": runs}), GREEN)
+        path = self.get.call_args_list[0][0][0]
         self.assertIn("/actions/workflows/ci.yml/runs?", path)
-        for part in ("branch=main", "event=push", "status=success"):
+        for part in ("branch=main", "event=push", "per_page=50"):
             self.assertIn(part, path)
+        self.assertNotIn("status=", path)
+        self.sleep.assert_not_called()
+
+    def test_a_listing_that_has_not_recorded_the_end_of_the_run_before_is_read_again(self):
+        """17.11: the run before went green two seconds before this one started; the listing still showed it running."""
+        lagging = {"workflow_runs": [wrun(500, "in_progress"), wrun(498, "in_progress", sha="d" * 40), wrun(490, sha=self.OLDER)]}
+        caught_up = {"workflow_runs": [wrun(500, "in_progress"), wrun(498, sha="d" * 40), wrun(490, sha=self.OLDER)]}
+        self.assertEqual(self.last(lagging, caught_up), "d" * 40)
+        self.sleep.assert_called_once_with(10)
+
+    def test_a_listing_that_never_catches_up_gives_no_base_and_the_suite_runs(self):
+        lagging = {"workflow_runs": [wrun(498, "in_progress"), wrun(490, sha=self.OLDER)]}
+        self.assertEqual(self.last(lagging, lagging, lagging), "")
+        self.assertEqual(self.sleep.call_count, 2)
+
+    def test_without_this_runs_id_an_unfinished_run_is_not_waited_for(self):
+        runs = {"workflow_runs": [wrun(498, "in_progress"), wrun(490, sha=self.OLDER)]}
+        filtered = {"workflow_runs": [{"head_sha": self.OLDER}]}
+        with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": ""}):
+            self.assertEqual(self.last(runs, filtered, current=None), self.OLDER)
+        self.sleep.assert_not_called()
+
+    def test_a_green_older_than_the_page_comes_from_the_filtered_listing(self):
+        page = {"workflow_runs": [wrun(i, conclusion="cancelled") for i in range(499, 449, -1)]}
+        filtered = {"workflow_runs": [{"head_sha": self.OLDER}]}
+        self.assertEqual(self.last(page, filtered), self.OLDER)
+        self.assertIn("status=success", self.get.call_args_list[1][0][0])
+
+    def test_this_runs_id_comes_from_the_environment(self):
+        runs = {"workflow_runs": [wrun(500, "in_progress"), wrun(498)]}
+        with mock.patch.object(lc, "_get", return_value=runs), mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "500"}):
+            self.assertEqual(lc.last_success("bvisible/neoffice-devops", "ci.yml", "main", "t"), GREEN)
 
     def test_none_or_no_answer_is_empty(self):
         for answer in (None, {}, {"workflow_runs": []}, {"workflow_runs": [{"head_sha": "short"}]}):
-            with mock.patch.object(lc, "_get", return_value=answer):
+            with mock.patch.object(lc, "_get", return_value=answer), mock.patch.dict(os.environ, {"GITHUB_RUN_ID": ""}):
                 self.assertEqual(lc.last_success("bvisible/neoffice-devops", "ci.yml", "main", "t"), "")
 
 

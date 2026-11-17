@@ -167,11 +167,57 @@ def decide(repo: str, base: str, head: str, token: str, also: tuple[str, ...] = 
     return judge_comparison(_get(f"/repos/{repo}/compare/{base}...{head}", token), also)
 
 
-def last_success(repo: str, workflow: str, branch: str, token: str) -> str:
+# How long to wait, and how often, for a listing that has not yet recorded the end of the run before this one.
+LISTING_WAITS = (10, 10, 10)
+
+
+def _green_in(runs: list, current: int | None) -> tuple[str, bool]:
+    """(head sha of the newest green run older than `current`, whether an older run still shows as not completed)."""
+    for run in runs:  # newest first
+        run = run or {}
+        rid = run.get("id")
+        if current is not None and isinstance(rid, int) and rid >= current:
+            continue  # this run, and the newer pushes waiting behind it
+        if run.get("status") != "completed":
+            return "", current is not None
+        if run.get("conclusion") == "success":
+            sha = run.get("head_sha", "")
+            return (sha if _valid_sha(sha) else ""), False
+    return "", False
+
+
+def last_success(repo: str, workflow: str, branch: str, token: str, current: int | None = None,
+                 waits: tuple = LISTING_WAITS) -> str:
+    """The head sha of the last successful push run of `workflow` on `branch`, empty when none.
+
+    17.11.2026: a push of trial pages waited behind a run of code; that run went green at 11:40:20 UTC, the waiting run
+    started at once, and two seconds later the listing filtered on `status=success` still gave the green before it:
+    the code of that run was counted in the range, and the pages paid the whole suite. With one run of a branch at a
+    time (the callers' concurrency), a run OLDER than this one (`current`, GITHUB_RUN_ID) that the listing shows as
+    not completed is a listing that has not caught up: read it again a few times. The unfiltered listing is read first;
+    the filtered one stays as the fallback (a green older than the page). Any doubt leaves the sha empty, and the suite
+    runs."""
     if not (_valid_repo(repo) and re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", workflow or "") and branch and token):
         return ""
+    if current is None:
+        raw = os.environ.get("GITHUB_RUN_ID", "")
+        current = int(raw) if raw.isdigit() else None
+    path = f"/repos/{repo}/actions/workflows/{workflow}/runs?"
+    q = urllib.parse.urlencode({"branch": branch, "event": "push", "per_page": 50})
+    for attempt in range(len(waits) + 1):
+        data = _get(path + q, token)
+        if data is None:
+            break
+        sha, behind = _green_in((data or {}).get("workflow_runs") or [], current)
+        if sha:
+            return sha
+        if not behind:
+            break
+        if attempt == len(waits):
+            return ""  # still not caught up: no base, the suite runs
+        time.sleep(waits[attempt])
     q = urllib.parse.urlencode({"branch": branch, "event": "push", "status": "success", "per_page": 1})
-    data = _get(f"/repos/{repo}/actions/workflows/{workflow}/runs?{q}", token)
+    data = _get(path + q, token)
     runs = (data or {}).get("workflow_runs") or []
     sha = (runs[0] or {}).get("head_sha", "") if runs else ""
     return sha if _valid_sha(sha) else ""
