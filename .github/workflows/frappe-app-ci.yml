@@ -1114,7 +1114,7 @@ jobs:
   # The machine: a Linux VM on the Mac mini (Ubuntu 24.04 arm64, 6 CPUs, 20 GiB), one runner per PRIVATE repository
   # (a runner of ours on a public one would run anyone's pull request: none is registered there, so a public caller
   # with the variable would only wait). No `services:`: MariaDB 10.6 and Redis are the machine's, and the job first
-  # takes one of its three places (`ci-slot acquire`: three heavy suites at most at once, each with its own database,
+  # takes one of its four places (`ci-slot acquire`: four heavy suites at most at once, each with its own database,
   # its own two Redis and its own stub ports; the fourth waits). Same steps as `tests`, in the same order; what differs
   # says why. The machine is described in neoffice-devops, scripts/ci-mini/.
   tests-mini:
@@ -1127,7 +1127,7 @@ jobs:
     name: build + tests (${{ inputs.app }}, neoffice-mini)
 
     steps:
-      - name: Take a place on the CI machine (three heavy suites at most at once)
+      - name: Take a place on the CI machine (four heavy suites at most at once)
         timeout-minutes: 305
         run: |
           ci-slot acquire
