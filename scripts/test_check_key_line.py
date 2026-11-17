@@ -50,7 +50,7 @@ class Repository(unittest.TestCase):
         return self.git("rev-parse", "HEAD")
 
     def change(self, name, message, date="2026-11-19T10:00:00"):
-        self.write(name, f"# {message}\n")
+        self.write(name, f"prompt = {message.splitlines()[0]!r}\n")
         return self.commit(message, date)
 
     def run_script(self, *args):
@@ -94,7 +94,7 @@ class TheGateBeforeACommit(Repository):
 
     def test_as_a_commit_msg_hook_it_reads_the_staged_files(self):
         self.write("message.txt", "feat(reading): a new prompt\n")
-        self.write(WATCHED, "# staged\n")
+        self.write(WATCHED, "staged = 1\n")
         self.git("add", WATCHED)
         refused = self.run_script("--message", str(self.root / "message.txt"))
         self.assertEqual(refused.returncode, 1)
@@ -186,6 +186,65 @@ class TheWeekOfWarnings(Repository):
         done = self.push()
         self.assertEqual(done.returncode, 1)
         self.assertIn("`key_line_blocks_from` is a day", done.stdout)
+
+
+class WhereTheLineIsAsked(Repository):
+    """Asked of every commit, the line would be written without a thought: it is asked where code changes."""
+
+    KEY = "\n\nKey: scan_split_by_rate"
+
+    def setUp(self):
+        super().setUp()
+        watched = [
+            {"path": "app/api/reading*.py", "why": "the reading of a scan"},
+            {"path": "app/api/reading_words.py", "why": "the words shown under an account", "key_line": False},
+            {"path": "app/mobile.py", "why": "the booking of a scan, among everything else", "key_line": False},
+            {"path": "app/scan/*", "why": "the scanned document"},
+            {"path": "app/public/window.js", "why": "the booking window"},
+        ]
+        self.write(key_line.CONFIG, json.dumps({"watched": watched, "key_line_since": "2026-11-18"}))
+        self.write(WATCHED, "def read(scan):\n    return scan.total\n")
+        self.write("app/public/window.js", "function book(scan) {\n\treturn scan.total;\n}\n")
+        self.base = self.commit("the code as it is" + self.KEY)
+
+    def test_a_path_watched_for_its_lists_only_asks_for_no_line(self):
+        self.change("app/mobile.py", "feat(till): a new button")
+        self.change("app/api/reading_words.py", "feat(words): new words, in a file a wider pattern also matches")
+        self.assertEqual((self.push().returncode, self.push().stdout), (0, ""))
+        self.assertEqual(self.gate("feat(till): a new button\n", "app/mobile.py").returncode, 0)
+
+    def test_a_test_in_a_watched_path_asks_for_no_line(self):
+        self.change("app/scan/test_scan.py", "test(scan): a new case")
+        self.change("app/scan/tests/cases.py", "test(scan): more cases")
+        self.change("app/scan/scan.test.js", "test(scan): the window")
+        self.assertEqual(self.push().returncode, 0, self.push().stdout)
+        self.assertEqual(self.gate("feat(scan): code\n", "app/scan/scan.py").returncode, 1, "its code still does")
+
+    def test_a_change_of_comments_only_asks_for_no_line(self):
+        self.write(WATCHED, "# why the total is read here\n\ndef read(scan):\n    # the total, as printed\n    return scan.total\n")
+        self.write("app/public/window.js", "// the window books what the scan read\nfunction book(scan) {\n\treturn scan.total;\n}\n")
+        self.assertEqual(self.gate("docs(reading): why\n", WATCHED, "app/public/window.js").returncode, 0)
+        self.commit("docs(reading): why the total is read here")
+        self.assertEqual((self.push().returncode, self.push().stdout), (0, ""))
+
+    def test_code_turned_into_a_comment_is_a_change_of_code(self):
+        self.write(WATCHED, "def read(scan):\n    scan.check()\n    return scan.total\n")
+        self.base = self.commit("feat(reading): the scan is checked before it is read" + self.KEY)
+        self.write(WATCHED, "def read(scan):\n    # scan.check()\n    return scan.total\n")
+        refused = self.gate("fix(reading): no check\n", WATCHED)
+        self.assertEqual(refused.returncode, 1, "the only line added is a comment, the line removed was code")
+        self.commit("fix(reading): no check")
+        self.assertEqual(self.push().returncode, 1)
+
+    def test_a_comment_beside_a_change_of_code_does_not_excuse_it(self):
+        self.write(WATCHED, "def read(scan):\n    # the gross total\n    return scan.gross\n")
+        self.assertEqual(self.gate("fix(reading): gross\n", WATCHED).returncode, 1)
+        self.write("app/public/window.js", "// a comment only\nfunction book(scan) {\n\treturn scan.total;\n}\n")
+        self.assertEqual(self.gate("fix(reading): gross\n", WATCHED, "app/public/window.js").returncode, 1)
+
+    def test_a_new_file_is_code_until_it_is_read(self):
+        self.write("app/scan/new_module.py", "# only a comment for now\n")
+        self.assertEqual(self.gate("feat(scan): a module\n", "app/scan/new_module.py").returncode, 1)
 
 
 class NotStarted(Repository):

@@ -23,6 +23,14 @@ It cannot prove that the code changed really sits behind the key it names: only 
 does. The line makes the author ask the question and leaves a trace a reader can check.
 Merges are not judged (a merge of upstream brings their commits), nor a commit made before `key_line_since`.
 
+The line is asked only where it means something: asked of every commit, it would be written without a thought. A
+commit needs it when it changes the code of a watched path, so not for:
+- a path watched for its word lists only: a watched entry that says `"key_line": false` (a file that mixes what the
+  assistant decides with everything else); a file such an entry matches is exempt, whatever the other entries say;
+- a test (`test_*.py`, `*.test.js`, a `tests/` folder);
+- a change of comments only: every line added or removed in the file is blank or a line comment (`#` in Python,
+  `//` in JavaScript). Code turned into a comment is not a comment: the line removed was code.
+
 A message can be corrected before the commit, not after the push. So the gate before a commit (--message) refuses
 from the first day, and a repository may give the pushed commits a period of warnings: with
 `"key_line_blocks_from": "YYYY-MM-DD"`, a commit made before that day and found without its line is only said, as a
@@ -62,8 +70,45 @@ def git(root: Path, *args: str) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
-def is_watched(config: dict, name: str) -> bool:
-    return any(fnmatch.fnmatchcase(name, str(entry.get("path") or "")) for entry in config.get("watched") or [])
+def is_test(name: str) -> bool:
+    path = Path(name)
+    return path.name.startswith("test_") or ".test." in path.name or "tests" in path.parts
+
+
+def asks_for_the_line(config: dict, name: str) -> bool:
+    """Whether a file is one whose code changes need the key line: watched, not for its lists only, not a test."""
+    matching = [
+        entry for entry in config.get("watched") or [] if fnmatch.fnmatchcase(name, str(entry.get("path") or ""))
+    ]
+    return bool(matching) and not any(entry.get("key_line") is False for entry in matching) and not is_test(name)
+
+
+def comments_only(root: Path, name: str, revision: str | None) -> bool:
+    """Whether what a commit (or, before a commit, the working tree against HEAD) changes in a file is comments only.
+
+    Every line added or removed is blank or a line comment. A change with no line to read (a new file not yet
+    followed, a renaming, a change of mode) is not taken for comments."""
+    marks = {".py": "#", ".js": "//"}.get(Path(name).suffix)
+    if not marks:
+        return False
+    diff = git(root, "show", "--format=", "-U0", revision, "--", name) if revision else git(
+        root, "diff", "-U0", "HEAD", "--", name
+    )
+    changed = [
+        line[1:].strip()
+        for line in diff.splitlines()
+        if line[:1] in ("+", "-") and not line.startswith(("+++", "---"))
+    ]
+    return bool(changed) and all(not line or line.startswith(marks) for line in changed)
+
+
+def changes_code(config: dict, root: Path, names: list[str], revision: str | None) -> list[str]:
+    """The files of a commit that make it need the key line."""
+    return [
+        name
+        for name in names
+        if name and asks_for_the_line(config, Path(name).as_posix()) and not comments_only(root, name, revision)
+    ]
 
 
 def key_exists(root: Path, key: str, revision: str | None) -> bool:
@@ -130,7 +175,7 @@ def main() -> int:
 
     if args.message:
         names = args.files or git(root, "diff", "--cached", "--name-only").split("\n")
-        touched = [name for name in names if name and is_watched(config, Path(name).as_posix())]
+        touched = changes_code(config, root, names, None)
         if not touched:
             return 0
         why = verdict(root, Path(args.message).read_text(encoding="utf-8"), None)
@@ -152,7 +197,7 @@ def main() -> int:
         if made < since:
             continue
         names = git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha).split("\n")
-        touched = [name for name in names if name and is_watched(config, name)]
+        touched = changes_code(config, root, names, sha)
         if not touched or any(sha.startswith(repair) for repair in repairs):
             continue
         why = verdict(root, git(root, "log", "-1", "--format=%B", sha), "HEAD")

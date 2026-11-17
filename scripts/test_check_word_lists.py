@@ -268,6 +268,11 @@ class TheRegistry(Repository):
         self.declare(self.entry, kind="decides", until="#2788")
         self.assertEqual(self.refused(), [])
 
+    def test_a_path_exempt_from_the_key_line_is_still_judged_for_its_lists(self):
+        self.watched[0]["key_line"] = False
+        (refusal,) = self.refused()
+        self.assertIn("a list of everyday words where the assistant decides", refusal)
+
     def test_a_watched_pattern_says_why_it_is_watched(self):
         self.declare(self.entry)
         self.watched.append({"path": "app/api/other*.py", "why": ""})

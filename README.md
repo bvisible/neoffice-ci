@@ -69,8 +69,9 @@ lists the stock, `--declare` prints the declarations to write). The stock is jud
 next one is copied from. The workflow also reads the commits that touch such a path: each names the site key that
 guards the change (`scripts/check_key_line.py`: `Key: <site key>`, or `Key: none, <why nothing changes for a
 customer>, reviewed by <who>`), from the day `key_line_since` names; a commit made before `key_line_blocks_from` is
-only said as a warning, since a pushed message can no longer be corrected. A repository without the file sees nothing
-change. At commit time, in `.pre-commit-config.yaml`:
+only said as a warning, since a pushed message can no longer be corrected. The line is asked where code changes:
+not for a test, not for a change of comments only, not for a path watched for its lists only (`"key_line": false`
+on its entry). A repository without the file sees nothing change. At commit time, in `.pre-commit-config.yaml`:
 
 ```yaml
       - id: check-word-lists
