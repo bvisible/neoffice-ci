@@ -286,6 +286,55 @@ jobs:
             echo "::warning::the window check could not be fetched: skipped"
           fi
 
+  # Where an app's assistant decides (an account, a tax rate, a kind of document), no list of everyday words decides in
+  # its place, and a commit that changes what it reads or proposes names the site key that guards the change (17.11.2026:
+  # a module that chose an account from a list of words reached the fleet's branch with no key, and was removed the same
+  # day). Only a repository that holds a `.decision-paths.json` is judged: the others see nothing change. The stock is
+  # judged too, an old list being the model the next one is copied from: every list is gone, or declared in that file
+  # with its reason and who accepted it. A job of its own: a refused list says nothing about the tests. A guard that
+  # cannot be fetched does not block.
+  # See scripts/check_word_lists.py and scripts/check_key_line.py.
+  decision-paths:
+    runs-on: ${{ vars.CI_RUNNER == 'neoffice-mini' && fromJSON('["self-hosted","linux","arm64","neoffice-mini"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    name: no list of words decides in the assistant's place (${{ inputs.app }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.app_ref || github.sha }}
+
+      - name: Read the paths where the assistant decides
+        run: |
+          if [ ! -f .decision-paths.json ]; then
+            echo "no .decision-paths.json in this repository: nothing is watched"
+            exit 0
+          fi
+          if curl -sfL -o /tmp/check_word_lists.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_word_lists.py; then
+            python3 /tmp/check_word_lists.py --root .
+          else
+            echo "::warning::the word-list check could not be fetched: skipped"
+          fi
+
+      - name: Read the key line of the commits that touch them
+        if: ${{ !cancelled() }}
+        run: |
+          if [ ! -f .decision-paths.json ]; then
+            exit 0
+          fi
+          # The commits of the last two weeks: a commit pushed without its line keeps this red until a later one repairs it.
+          if ! git fetch -q --shallow-since="15 days ago" origin "$GITHUB_SHA" 2>/dev/null \
+              && ! git fetch -q --deepen=300 origin "$GITHUB_SHA"; then
+            echo "::warning::the history could not be fetched: the key-line check is skipped"
+            exit 0
+          fi
+          if curl -sfL -o /tmp/check_key_line.py \
+              https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/check_key_line.py; then
+            python3 /tmp/check_key_line.py --root . --days 14
+          else
+            echo "::warning::the key-line check could not be fetched: skipped"
+          fi
+
   # A nightly on an app nobody touched proves nothing and costs ~12 minutes of the
   # account's Actions allowance. This gate asks the hub what was last proven green
   # and skips the heavy job when the tree has not moved since. It asks the HUB and

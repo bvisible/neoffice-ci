@@ -17,3 +17,15 @@
   entry: scripts/check_dialogs.py --base HEAD
   language: script
   files: \.(js|ts|jsx|tsx|vue|html|css|scss)$
+- id: check-word-lists
+  name: no list of words decides in the assistant's place
+  description: In the paths a repository declares in .decision-paths.json, every list of everyday words is gone or declared with its reason and who accepted it.
+  entry: scripts/check_word_lists.py
+  language: script
+  files: (\.(py|js)$|^\.decision-paths\.json$)
+- id: check-key-line
+  name: a commit that touches a decision path names its site key
+  description: A commit that touches a path declared in .decision-paths.json holds a line "Key:" naming the site key that guards the change, or says why there is none and who reviewed it.
+  entry: scripts/check_key_line.py --message
+  language: script
+  stages: [commit-msg]

@@ -59,6 +59,21 @@ nobody until someone touches it, and `--inventory --json` lists it. At commit ti
       - id: check-dialogs
 ```
 
+In a repository that holds a `.decision-paths.json` (the paths where its assistant decides, each with its reason), the
+workflow refuses a list of everyday words that decides in the assistant's place: a tuple, a table, a pattern with
+alternatives or a single word looked for in a text, in a watched file, that is not declared in that file with what it
+does, why it may stay, who accepted it and when; a declared list that gained a word is refused until it is accepted
+again (`scripts/check_word_lists.py`; `--inventory` lists the stock, `--declare` prints the declarations to write).
+The stock is judged too: an old list is the model the next one is copied from. It also refuses a commit that touches
+such a path and does not name the site key that guards the change (`scripts/check_key_line.py`: `Key: <site key>`, or
+`Key: none, <why nothing changes for a customer>, reviewed by <who>`; it starts on the day `key_line_since` names).
+A repository without the file sees nothing change. At commit time, in `.pre-commit-config.yaml`:
+
+```yaml
+      - id: check-word-lists
+      - id: check-key-line
+```
+
 A push whose files, since the last green run of its branch, are all documentation or translation catalogues
 (`*.md`, `docs/**`, `.claude/**`, `**/locale/*.po|pot`) does not run the heavy suite: a light job reads its
 catalogues the way `bench compile-po-to-mo` does (`scripts/ci_light_change.py`, `scripts/check_po_reads.py`). Any
