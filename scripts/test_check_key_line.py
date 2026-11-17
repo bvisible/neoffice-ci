@@ -139,7 +139,8 @@ class ThePushedCommits(Repository):
         self.change(WATCHED, "feat(reading): on a side branch\n\nKey: scan_split_by_rate")
         self.git("checkout", "-q", "main")
         self.change("README.md", "docs: meanwhile")
-        self.git("merge", "-q", "--no-ff", "side", "-m", "Merge branch side")
+        day = "2026-11-19T12:00:00"  # made after the rule started, or it would be left out for its date alone
+        self.git("merge", "-q", "--no-ff", "side", "-m", "Merge branch side", GIT_COMMITTER_DATE=day, GIT_AUTHOR_DATE=day)
         self.assertEqual(self.push().returncode, 0)
 
     def test_without_a_base_the_last_days_are_read(self):
@@ -245,6 +246,167 @@ class WhereTheLineIsAsked(Repository):
     def test_a_new_file_is_code_until_it_is_read(self):
         self.write("app/scan/new_module.py", "# only a comment for now\n")
         self.assertEqual(self.gate("feat(scan): a module\n", "app/scan/new_module.py").returncode, 1)
+
+
+MOBILE = """
+import re
+
+
+def till_button(order):
+    return order.total
+
+
+def _rank(line):
+    return line.amount
+
+
+def _split(lines):
+    # one line per rate
+    return sorted(lines, key=_rank)
+
+
+def _flag(value):
+    return bool(value)
+
+
+def create_invoice(scan):
+    \"\"\"Creates the purchase invoice of a scan.\"\"\"
+    return _split(scan.lines)
+
+
+def preview_entry(scan):
+    return _flag(scan.paid)
+
+
+class Bank:
+    def pay(self, invoice):
+        return invoice.total
+"""
+
+
+class TheFunctionsOfAFile(Repository):
+    """In a file that mixes what is booked with everything else, the line is asked for the functions the registry
+    names, and for the functions of the file they run."""
+
+    KEY = "\n\nKey: scan_split_by_rate"
+    FILE = "app/mobile.py"
+
+    def setUp(self):
+        super().setUp()
+        self.named = [
+            {"function": "create_invoice", "why": "creates the purchase invoice of a scan"},
+            {"function": "preview_entry", "why": "says the entry a paid scan will make"},
+            {"function": "Bank.pay", "why": "writes the payment of an invoice"},
+        ]
+        self.register()
+        self.write(self.FILE, MOBILE)
+        self.base = self.commit("the file as it is" + self.KEY)
+
+    def register(self, **more):
+        watched = [{"path": self.FILE, "why": "the booking of a scan, among everything else", "key_line": self.named}]
+        self.write(key_line.CONFIG, json.dumps({"watched": watched, "key_line_since": "2026-11-18", **more}))
+
+    def edit(self, old, new, message=None):
+        text = (self.root / self.FILE).read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, old)
+        self.write(self.FILE, text.replace(old, new))
+        return self.commit(message) if message else None
+
+    def asked(self, old, new):
+        """Whether the change asks for the line: the same answer before the commit and once it is pushed."""
+        self.edit(old, new)
+        gate = self.gate("fix: a change\n", self.FILE)
+        self.commit("fix: a change")
+        pushed = self.push()
+        self.assertEqual(gate.returncode, pushed.returncode, gate.stdout + pushed.stdout)
+        return pushed
+
+    def test_a_function_nobody_named_and_no_named_function_runs_asks_for_no_line(self):
+        done = self.asked("return order.total", "return order.total + order.tip")
+        self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+    def test_a_named_function_asks_for_the_line_and_is_named_in_the_refusal(self):
+        done = self.asked("return _split(scan.lines)", "return _split(scan.lines)[:1]")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("touches app/mobile.py (create_invoice)", done.stdout)
+
+    def test_a_function_a_named_function_runs_asks_for_the_line_a_callback_too(self):
+        done = self.asked("return sorted(lines, key=_rank)", "return sorted(lines, key=_rank, reverse=True)")
+        self.assertIn("touches app/mobile.py (_split)", done.stdout)
+        done = self.asked("return line.amount", "return -line.amount")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("(_rank)", done.stdout)
+
+    def test_a_method_named_with_its_class_asks_for_the_line(self):
+        done = self.asked("return invoice.total", "return invoice.total - invoice.discount")
+        self.assertIn("(Bank.pay)", done.stdout)
+
+    def test_a_new_helper_is_read_as_soon_as_a_named_function_runs_it(self):
+        self.edit("def _flag(value):", "def _net(scan):\n    return scan.total\n\n\ndef _flag(value):")
+        self.edit("return _flag(scan.paid)", "return _flag(scan.paid) and _net(scan)", "feat: the net of an entry" + self.KEY)
+        self.base = self.git("rev-parse", "HEAD")
+        done = self.asked("    return scan.total\n\n\ndef _flag", "    return scan.total - scan.vat\n\n\ndef _flag")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("(_net)", done.stdout)
+
+    def test_comments_a_docstring_and_a_function_that_only_moved_are_not_a_change(self):
+        self.edit("    # one line per rate\n", "    # one line per rate of the document, sorted\n")
+        self.edit('    """Creates the purchase invoice of a scan."""\n', '    """Creates the invoice."""\n')
+        text = (self.root / self.FILE).read_text(encoding="utf-8")
+        moved = "def _flag(value):\n    return bool(value)\n\n\n"
+        self.write(self.FILE, text.replace(moved, "") + "\n\n" + moved.rstrip("\n") + "\n")
+        self.assertEqual(self.gate("docs: words\n", self.FILE).returncode, 0)
+        self.commit("docs: words")
+        self.assertEqual((self.push().returncode, self.push().stdout), (0, ""))
+
+    def test_a_new_function_nobody_named_passes_which_is_the_limit_of_the_list(self):
+        self.edit("class Bank:", "def create_payment(scan):\n    return scan.total\n\n\nclass Bank:")
+        self.assertEqual(self.gate("feat: a payment\n", self.FILE).returncode, 0)
+
+    def test_a_file_that_no_longer_parses_is_taken_as_changed(self):
+        self.edit("def till_button(order):", "def till_button(order:")
+        self.assertEqual(self.gate("fix: x\n", self.FILE).returncode, 1)
+
+    def test_a_function_the_registry_names_and_the_file_no_longer_holds_is_refused(self):
+        self.edit("def preview_entry(scan):", "def preview_of_the_entry(scan):")
+        gate = self.gate("refactor: a clearer name" + self.KEY + "\n", self.FILE)
+        self.assertEqual(gate.returncode, 1)
+        self.assertIn("app/mobile.py no longer holds the function preview_entry", gate.stdout)
+        self.commit("refactor: a clearer name" + self.KEY)
+        done = self.push()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("name the function that took its place", done.stdout)
+        self.named[1]["function"] = "preview_of_the_entry"
+        self.register()
+        self.commit("chore: the registry follows" + self.KEY)
+        self.assertEqual(self.push().returncode, 0, self.push().stdout)
+
+    def test_the_file_of_another_author_is_not_read_from_the_working_tree(self):
+        self.edit("def preview_entry(scan):", "def preview_of_the_entry(scan):")
+        self.assertEqual(self.gate("docs: a typo\n", "README.md").returncode, 0, "not a file of this commit")
+        self.assertEqual(self.gate("chore: registry\n", key_line.CONFIG).returncode, 1, "the registry itself is")
+
+    def test_a_function_is_named_with_its_reason_in_one_file(self):
+        self.named.append({"function": "create_payment"})
+        self.register()
+        done = self.gate("docs: x\n", "README.md")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("the function create_payment is named without its reason", done.stdout)
+        self.named.pop()
+        self.write(
+            key_line.CONFIG,
+            json.dumps({"watched": [{"path": "app/*.py", "why": "x", "key_line": self.named}], "key_line_since": "2026-11-18"}),
+        )
+        self.assertIn("names one file, not a pattern", self.gate("docs: x\n", "README.md").stdout)
+
+    def test_a_named_function_keeps_its_week_of_warnings(self):
+        self.register(key_line_blocks_from="2026-11-24")
+        self.base = self.commit("chore: a week of warnings" + self.KEY)
+        self.edit("return _split(scan.lines)", "return _split(scan.lines)[:1]")
+        self.commit("fix: one line", "2026-11-20T10:00:00")
+        done = self.push()
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertRegex(done.stdout, r"^::warning::\w{10} « fix: one line » touches app/mobile.py \(create_invoice\)")
 
 
 class NotStarted(Repository):

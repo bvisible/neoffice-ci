@@ -31,6 +31,20 @@ commit needs it when it changes the code of a watched path, so not for:
 - a change of comments only: every line added or removed in the file is blank or a line comment (`#` in Python,
   `//` in JavaScript). Code turned into a comment is not a comment: the line removed was code.
 
+In a file that mixes what the assistant books with everything else, the line can be asked for some functions only:
+the watched entry names them, each with its reason,
+
+    {"path": "app/mobile.py", "why": "...",
+     "key_line": [{"function": "create_invoice", "why": "creates the purchase invoice of a scan"}, ...]}
+
+and the line is asked when a commit changes one of them, or a function of the same file they run: every function
+of the file a named function refers to, and so on, is read with it (a helper, a callback). Changed means that its
+code differs once comments and docstrings are set aside; a function that only moved has not changed. A Python file
+is read without being run, before and after the commit. What this cannot see is never refused: a new function
+nobody named and no named function runs, a call that goes through another file, a name built while running. A
+function the registry names and the file no longer holds is refused, as is a name without its reason: the list
+would guard nothing without anybody noticing.
+
 A message can be corrected before the commit, not after the push. So the gate before a commit (--message) refuses
 from the first day, and a repository may give the pushed commits a period of warnings: with
 `"key_line_blocks_from": "YYYY-MM-DD"`, a commit made before that day and found without its line is only said, as a
@@ -49,7 +63,9 @@ Exit 1 when a commit is refused.
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
+import functools
 import json
 import re
 import subprocess
@@ -75,12 +91,21 @@ def is_test(name: str) -> bool:
     return path.name.startswith("test_") or ".test." in path.name or "tests" in path.parts
 
 
-def asks_for_the_line(config: dict, name: str) -> bool:
-    """Whether a file is one whose code changes need the key line: watched, not for its lists only, not a test."""
-    matching = [
-        entry for entry in config.get("watched") or [] if fnmatch.fnmatchcase(name, str(entry.get("path") or ""))
-    ]
-    return bool(matching) and not any(entry.get("key_line") is False for entry in matching) and not is_test(name)
+def matching(config: dict, name: str) -> list[dict]:
+    return [entry for entry in config.get("watched") or [] if fnmatch.fnmatchcase(name, str(entry.get("path") or ""))]
+
+
+def line_scope(config: dict, name: str) -> bool | list[str]:
+    """What of a file asks for the key line: False (nothing), True (any change of its code), or named functions.
+
+    An entry that says `"key_line": false` exempts the file whatever the others say; an entry that names functions
+    limits the line to them, unless another entry asks for the whole file. A test asks for nothing."""
+    entries = matching(config, name)
+    if not entries or is_test(name) or any(entry.get("key_line") is False for entry in entries):
+        return False
+    if not all(isinstance(entry.get("key_line"), list) for entry in entries) or Path(name).suffix != ".py":
+        return True
+    return [str(item.get("function")) for entry in entries for item in entry["key_line"] if isinstance(item, dict)]
 
 
 def comments_only(root: Path, name: str, revision: str | None) -> bool:
@@ -91,8 +116,10 @@ def comments_only(root: Path, name: str, revision: str | None) -> bool:
     marks = {".py": "#", ".js": "//"}.get(Path(name).suffix)
     if not marks:
         return False
-    diff = git(root, "show", "--format=", "-U0", revision, "--", name) if revision else git(
-        root, "diff", "-U0", "HEAD", "--", name
+    diff = (
+        git(root, "show", "--format=", "-U0", revision, "--", name)
+        if revision
+        else git(root, "diff", "-U0", "HEAD", "--", name)
     )
     changed = [
         line[1:].strip()
@@ -102,13 +129,107 @@ def comments_only(root: Path, name: str, revision: str | None) -> bool:
     return bool(changed) and all(not line or line.startswith(marks) for line in changed)
 
 
+@functools.lru_cache(maxsize=8)
+def functions_of(source: str) -> dict[str, tuple[str, set[str]]] | None:
+    """{function: (its code without comments, docstrings or positions, the names it refers to)} of a Python source.
+
+    The functions of the module and the methods of its classes (`Class.method`). None when the source does not parse."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and body:
+            first = body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                node.body = body[1:] or [ast.Pass()]
+    found = {}
+    for node in tree.body:
+        owned = [(node.name, node)] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
+        if isinstance(node, ast.ClassDef):
+            owned = [
+                (f"{node.name}.{child.name}", child)
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+        for name, function in owned:
+            found[name] = (ast.dump(function), {n.id for n in ast.walk(function) if isinstance(n, ast.Name)})
+    return found
+
+
+def file_at(root: Path, name: str, revision: str | None) -> str:
+    """A file as a revision holds it; with no revision, as the working tree holds it. '' when it is not there."""
+    if revision:
+        return git(root, "show", f"{revision}:{name}")
+    try:
+        return (root / name).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def functions_changed(root: Path, name: str, revision: str | None, named: list[str]) -> list[str]:
+    """The named functions, and the functions of the file they run, that a commit changes in a Python file.
+
+    Before a commit (no revision), the working tree against HEAD. A file that no longer parses is taken as changed."""
+    before = functions_of(file_at(root, name, f"{revision}^" if revision else "HEAD")) or {}
+    after = functions_of(file_at(root, name, revision))
+    if after is None:
+        return ["the file does not parse"]
+    reached, todo = set(), list(named)
+    while todo:
+        function = todo.pop()
+        if function in reached:
+            continue
+        reached.add(function)
+        for version in (before, after):
+            todo += [other for other in version.get(function, ("", set()))[1] if other in version]
+    return sorted(f for f in reached if before.get(f, ("",))[0] != after.get(f, ("",))[0])
+
+
 def changes_code(config: dict, root: Path, names: list[str], revision: str | None) -> list[str]:
-    """The files of a commit that make it need the key line."""
-    return [
-        name
-        for name in names
-        if name and asks_for_the_line(config, Path(name).as_posix()) and not comments_only(root, name, revision)
-    ]
+    """What of a commit makes it need the key line: a file, or a file and its functions that changed."""
+    found = []
+    for name in names:
+        scope = line_scope(config, Path(name).as_posix()) if name else False
+        if scope is True and not comments_only(root, name, revision):
+            found.append(name)
+        elif isinstance(scope, list):
+            changed = functions_changed(root, name, revision, scope)
+            if changed:
+                found.append(f"{name} ({', '.join(changed[:4])}{'…' if len(changed) > 4 else ''})")
+    return found
+
+
+def registry_flaws(config: dict, root: Path, revision: str | None, only: list[str] | None = None) -> list[str]:
+    """What is wrong with the functions the registry names: no reason, or a function its file no longer holds.
+
+    `only`: before a commit, the files of that commit; the file of another author is not read from the working tree."""
+    flaws = []
+    for entry in config.get("watched") or []:
+        named = entry.get("key_line")
+        if not isinstance(named, list):
+            continue
+        path = str(entry.get("path") or "")
+        if any(mark in path for mark in "*?["):
+            flaws.append(f"{CONFIG}: {path}: `key_line` names functions, so the entry names one file, not a pattern")
+            continue
+        for item in named:
+            if not isinstance(item, dict) or not str(item.get("function") or "").strip():
+                flaws.append(f"{CONFIG}: {path}: an entry of `key_line` names no `function`")
+            elif not str(item.get("why") or "").strip():
+                flaws.append(f"{CONFIG}: {path}: the function {item['function']} is named without its reason (`why`)")
+        if only is not None and path not in only and CONFIG not in only:
+            continue
+        held = functions_of(file_at(root, path, revision))
+        for item in named if held is not None else []:
+            function = str(item.get("function") or "") if isinstance(item, dict) else ""
+            if function and function not in held:
+                flaws.append(
+                    f"{CONFIG}: {path} no longer holds the function {function} that `key_line` names: name the "
+                    "function that took its place, or the list guards nothing"
+                )
+    return flaws
 
 
 def key_exists(root: Path, key: str, revision: str | None) -> bool:
@@ -143,8 +264,18 @@ def verdict(root: Path, message: str, revision: str | None) -> str | None:
     return None if None in flaws else flaws[0]
 
 
-def commits(root: Path, selection: list[str]) -> list[str]:
-    return [sha for sha in git(root, "rev-list", "--no-merges", *selection).split() if sha]
+def commits(root: Path, selection: list[str]) -> list[tuple[str, str, str, str, list[str]]]:
+    """(sha, day, subject, message, files) of every commit of the selection, the oldest first, merges left out.
+
+    One reading of the history for all of them: a repository takes hundreds of commits in two weeks."""
+    told = git(
+        root, "log", "--no-merges", "--reverse", "--name-only", "--format=%x01%H%x00%cs%x00%s%x00%B%x00", *selection
+    )
+    found = []
+    for record in told.split("\x01")[1:]:
+        sha, day, subject, message, names = record.split("\x00", 4)
+        found.append((sha, day, subject, message, [name for name in names.split("\n") if name]))
+    return found
 
 
 def main() -> int:
@@ -175,6 +306,11 @@ def main() -> int:
 
     if args.message:
         names = args.files or git(root, "diff", "--cached", "--name-only").split("\n")
+        flaws = registry_flaws(config, root, None, [Path(name).as_posix() for name in names if name])
+        for line in flaws:
+            print(line)
+        if flaws:
+            return 1
         touched = changes_code(config, root, names, None)
         if not touched:
             return 0
@@ -184,25 +320,25 @@ def main() -> int:
             print("Add `Key: <site key>` or `Key: none, <why nothing changes for a customer>, reviewed by <who>`.")
         return 1 if why else 0
 
+    flaws = registry_flaws(config, root, "HEAD")
+    for line in flaws:
+        print(line)
+    if flaws:
+        return 1
     selection = [f"{args.base}..HEAD"] if args.base else [f"--since={args.days} days ago", "HEAD"]
     judged = commits(root, selection)
     repairs = []
-    for sha in judged:
-        for found in REPAIR_LINE.finditer(git(root, "log", "-1", "--format=%B", sha)):
+    for _sha, _day, _subject, message, _names in judged:
+        for found in REPAIR_LINE.finditer(message):
             if not flaw(root, found.group("value"), "HEAD"):
                 repairs.append(found.group("sha"))
     refused = warned = 0
-    for sha in reversed(judged):
-        made = git(root, "log", "-1", "--format=%cs", sha).strip()
-        if made < since:
+    for sha, made, subject, message, names in judged:
+        if made < since or any(sha.startswith(repair) for repair in repairs):
             continue
-        names = git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha).split("\n")
         touched = changes_code(config, root, names, sha)
-        if not touched or any(sha.startswith(repair) for repair in repairs):
-            continue
-        why = verdict(root, git(root, "log", "-1", "--format=%B", sha), "HEAD")
+        why = verdict(root, message, "HEAD") if touched else None
         if why:
-            subject = git(root, "log", "-1", "--format=%s", sha).strip()
             line = f"{sha[:10]} « {subject[:80]} » touches {touched[0]}: {why}."
             if blocks_from and made < blocks_from:
                 warned += 1

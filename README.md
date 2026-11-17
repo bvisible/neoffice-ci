@@ -71,7 +71,9 @@ guards the change (`scripts/check_key_line.py`: `Key: <site key>`, or `Key: none
 customer>, reviewed by <who>`), from the day `key_line_since` names; a commit made before `key_line_blocks_from` is
 only said as a warning, since a pushed message can no longer be corrected. The line is asked where code changes:
 not for a test, not for a change of comments only, not for a path watched for its lists only (`"key_line": false`
-on its entry). A repository without the file sees nothing change. At commit time, in `.pre-commit-config.yaml`:
+on its entry). In a file that mixes what the assistant books with everything else, the entry names the functions
+that ask for the line, each with its reason: a commit that changes one of them, or a function of the file they run,
+is asked for it. A repository without the file sees nothing change. At commit time, in `.pre-commit-config.yaml`:
 
 ```yaml
       - id: check-word-lists
