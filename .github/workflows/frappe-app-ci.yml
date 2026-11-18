@@ -934,6 +934,16 @@ jobs:
         working-directory: /home/runner/frappe-bench
         run: bench build --app ${{ inputs.app }}
 
+      - name: Compile the app's translation catalogues
+        # An instance compiles every app's catalogue at each update; an app that commits its build skips the
+        # step above, so its catalogue was never compiled here and a test that reads a label in French saw the
+        # English one (insights and hrms, 18.11). A catalogue that does not compile is said, not blocking: the
+        # light check reads the catalogues the way Frappe compiles them.
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench compile-po-to-mo --app ${{ inputs.app }} --force || echo "::warning::the catalogues of ${{ inputs.app }} did not compile"
+          bench --site test_site clear-cache
+
       - name: Debug test records (test_args starts with --debug-records)
         if: startsWith(inputs.test_args, '--debug-records')
         working-directory: /home/runner/frappe-bench/sites
@@ -1471,6 +1481,16 @@ jobs:
         timeout-minutes: ${{ inputs.tests_timeout_minutes }}
         working-directory: ${{ env.BENCH }}
         run: bench build --app ${{ inputs.app }}
+
+      - name: Compile the app's translation catalogues
+        # An instance compiles every app's catalogue at each update; an app that commits its build skips the
+        # step above, so its catalogue was never compiled here and a test that reads a label in French saw the
+        # English one (insights and hrms, 18.11). A catalogue that does not compile is said, not blocking: the
+        # light check reads the catalogues the way Frappe compiles them.
+        working-directory: ${{ env.BENCH }}
+        run: |
+          bench compile-po-to-mo --app ${{ inputs.app }} --force || echo "::warning::the catalogues of ${{ inputs.app }} did not compile"
+          bench --site test_site clear-cache
 
       - name: Debug test records (test_args starts with --debug-records)
         if: startsWith(inputs.test_args, '--debug-records')
