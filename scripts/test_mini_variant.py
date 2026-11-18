@@ -27,7 +27,7 @@ ONLY_ON_GITHUB = {
     "Install MariaDB client and wkhtmltopdf (patched Qt build, as frappe's own CI)",  # installed once on the machine
 }
 ONLY_ON_THE_MACHINE = {
-    "Take a place on the CI machine (three heavy suites at most at once)",
+    "Take a place on the CI machine (four heavy suites at most at once)",
     "MariaDB client, Redis and wkhtmltopdf of the machine (installed once, nothing installed here)",
     "Free the place (database, bench and Redis of this job removed)",
 }
