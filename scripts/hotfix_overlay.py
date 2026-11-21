@@ -15,6 +15,8 @@ and this repository are public. A value is never put in a shell command: the wor
     fileset        the names of the files of the build, or of a revision, with the fingerprints of the bundler taken out
     compare        the witness: the build of the base alone must give the files the base committed
     next-tag       the name of the tag: `hotfix/<app>/<B7>-<n>`, n the next free rank
+    modes          refuse any file of the overlay that is no regular file (a symlink, a submodule)
+    build-version  the version the front end is built with: derived from the base and the fix, never from an identifier or a run
     notice         the line the workflow writes for the hub to read back (which run made which tag)
 
 Every refusal is `refused: <code>: <why>` on the error output and exit code 1: `check`, `apply`, `compare` and `next-tag` end the job.
@@ -105,7 +107,7 @@ def _is_ancestor(repo: str, ancestor: str, descendant: str) -> bool:
     return git(repo, "merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
 
 
-def check_commits(repo: str, base: str, commits: list[str], branch_ref: str) -> None:
+def check_commits(repo: str, base: str, commits: list[str], branch_ref: str, artifact_paths: list[str] | None = None) -> None:
     """The base is on the deploy branch; every commit is on it too, is not in the base already, and applies as a plain commit."""
     if not _has_commit(repo, base):
         raise Refusal("unknown_base", "the base is not a commit of this repository: GitHub does not know what the instance runs")
@@ -126,6 +128,10 @@ def check_commits(repo: str, base: str, commits: list[str], branch_ref: str) -> 
             name = path.rsplit("/", 1)[-1]
             if any(fnmatch.fnmatchcase(name, pattern) for pattern in DENIED_NAMES):
                 raise Refusal("dependency_or_patch", f"{short} changes {path}: a dependency or a patch goes in a wave")
+            if any(path == a or (a.endswith("/") and path.startswith(a)) for a in artifact_paths or ()):
+                # What the build writes is written by the build, in the one commit the CI makes: a fix commit that writes it by hand ships
+                # content no build produced (and the build's witness is skipped when the fix touches no source).
+                raise Refusal("fix_writes_the_build", f"{short} changes {path}, which only the build writes")
 
 
 def _files(repo: str, commit: str) -> list[str]:
@@ -157,6 +163,23 @@ def apply_commits(repo: str, base: str, commits: list[str]) -> str:
             git(repo, "reset", "--hard", "--quiet", base)
             raise Refusal("conflict", f"{commit[:7]} does not apply on the base: this fix goes in a wave")
     return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+REGULAR_MODES = ("100644", "100755", "000000")
+
+
+def check_modes(repo: str, base: str) -> None:
+    """After the cherry-picks: no file of the overlay is a symlink or a submodule (nginx would serve what a link points to)."""
+    raw = git(repo, "diff", "--raw", "--no-renames", base, "HEAD").stdout.splitlines()
+    for line in raw:
+        fields = line.lstrip(":").split()
+        if len(fields) >= 5 and fields[1] not in REGULAR_MODES:
+            raise Refusal("not_a_regular_file", f"a file of the overlay has the mode {fields[1]}: a symlink or a submodule is never part of a fix")
+
+
+def build_version(base: str, commits: list[str]) -> str:
+    """`hf-<base7>-<last fix7>`: the version.json of the till says it, and it is public: no identifier, no run, nothing of a customer."""
+    return f"hf-{base[:7]}-{commits[-1][:7]}"
 
 
 def normalize_name(path: str) -> str:
@@ -197,7 +220,10 @@ def next_tag(app: str, base: str, existing_refs: list[str]) -> str:
         match = re.fullmatch(re.escape(head) + r"([1-9][0-9]{0,3})", name)
         if match:
             ranks.append(int(match.group(1)))
-    return f"{head}{max(ranks, default=0) + 1}"
+    rank = max(ranks, default=0) + 1
+    if rank > 9999:
+        raise Refusal("no_rank_left", "the ranks of this base are used up")
+    return f"{head}{rank}"
 
 
 def notice_line(tag: str, tip: str, hotfix_id: str, run_id: str) -> str:
@@ -239,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--repo", default=".")
     sub.choices["check"].add_argument("--branch-ref", default=None, help="default: origin/<BRANCH>")
     sub.choices["touches"].add_argument("--prefixes", default=None, help="default: the FRONT_SOURCES environment variable")
-    for name in ("fileset", "compare", "next-tag", "notice"):
+    for name in ("fileset", "compare", "next-tag", "notice", "modes", "build-version"):
         sub.add_parser(name)
     sub.choices["fileset"].add_argument("--repo", default=".")
     sub.choices["fileset"].add_argument("--rev", default=None, help="a revision (what was committed); default: the files on disk")
@@ -247,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.choices["compare"].add_argument("built")
     sub.choices["compare"].add_argument("committed")
     sub.choices["next-tag"].add_argument("--repo", default=".")
+    sub.choices["modes"].add_argument("--repo", default=".")
     sub.choices["notice"].add_argument("--tag", required=True)
     sub.choices["notice"].add_argument("--sha", required=True)
     args = parser.parse_args(argv)
@@ -255,7 +282,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             commits = split_commits(_env("COMMITS"))
             validate_inputs(_env("APP"), _env("BASE"), commits, _env("HOTFIX_ID"), _env("BRANCH"))
-            check_commits(args.repo, _env("BASE"), commits, args.branch_ref or f"origin/{_env('BRANCH')}")
+            check_commits(
+                args.repo, _env("BASE"), commits, args.branch_ref or f"origin/{_env('BRANCH')}", _lines(_env("ARTIFACT_PATHS"))
+            )
             _output("commit_count", str(len(commits)))
             return 0
         if args.command == "apply":
@@ -289,6 +318,12 @@ def main(argv: list[str] | None = None) -> int:
             raw = git(args.repo, "ls-remote", "--tags", "origin", f"refs/tags/{TAG_PREFIX}{_env('APP')}/*").stdout
             refs = [line.split("\t", 1)[1] for line in raw.splitlines() if "\t" in line]
             print(next_tag(_env("APP"), _env("BASE"), refs))
+            return 0
+        if args.command == "modes":
+            check_modes(args.repo, _env("BASE"))
+            return 0
+        if args.command == "build-version":
+            print(build_version(_env("BASE"), split_commits(_env("COMMITS"))))
             return 0
         if args.command == "notice":
             print(notice_line(args.tag, args.sha, _env("HOTFIX_ID"), _env("RUN_ID")))

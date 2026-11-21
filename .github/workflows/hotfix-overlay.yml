@@ -11,9 +11,17 @@ name: Hotfix overlay (reusable)
 # GitHub can: the commits are on the deploy branch, apply on the base, build the way the base built, and the specs of the front pass.
 #
 # Never a name of an instance, of a host or of a client comes in: the inputs are hashes and an opaque identifier, validated by
-# scripts/hotfix_overlay.py, and none of them is written into a shell command (they travel in the environment). Only this workflow
-# makes a `hotfix/*` tag: the repository has a tag ruleset that lets nobody else create or move one, and the tag's message and a
-# notice of the run say which run made which commit, for the hub to read back.
+# scripts/hotfix_overlay.py, and none of them is written into a shell command (they travel in the environment).
+#
+# Two jobs, because building runs third-party code (`yarn install` lifecycle scripts, the bundler, the specs) and publishing needs a
+# write token: `build` holds a READ token, checks nothing out with credentials and hands over a git bundle; `publish` holds the write token,
+# runs no third-party code, checks the bundle against what `build` said and pushes ONE annotated tag. Both run the script of the neoffice-ci
+# commit named by `ci_ref` (a hash the caller pins, with this workflow's own `uses: …@<hash>`), never a branch.
+#
+# What binds the tag to this run for the hub is the notice THIS RUN writes as a notice of its own job (tag, commit, identifier, run): the hub
+# reads it from the run's annotations, and it believes the run only if the three files that ran (the caller, this workflow, the script) are
+# versions it knows. The tag's own message and tagger are text its author writes. GitHub does not let the Actions app be the only creator of
+# `hotfix/*` tags, so the ruleset of the app's repository only forbids MOVING one.
 on:
   workflow_call:
     inputs:
@@ -33,6 +41,10 @@ on:
         description: "Opaque identifier of the overlay, HF-0001 (the hub's record; never a name of an instance)"
         required: true
         type: string
+      ci_ref:
+        description: "Full hash of the neoffice-ci commit this workflow and its script are at: the caller pins it, the script is run from it"
+        required: true
+        type: string
       branch:
         description: "The deploy branch the fix is already on"
         required: false
@@ -44,7 +56,7 @@ on:
         type: string
         default: ""
       artifact_paths:
-        description: "Everything the build writes and the repository commits, one per line (a folder ends with a slash)"
+        description: "Everything the build writes and the repository commits, one per line (a folder ends with a slash); a fix commit may not write them"
         required: false
         type: string
         default: ""
@@ -64,17 +76,17 @@ on:
         type: string
         default: ""
       specs_command:
-        description: "Runs the specs of the front end"
+        description: "Runs the specs of the front end (required when the fix touches the front end)"
         required: false
         type: string
         default: ""
     outputs:
       tag:
         description: "The tag that was published"
-        value: ${{ jobs.overlay.outputs.tag }}
+        value: ${{ jobs.publish.outputs.tag }}
       sha:
         description: "The commit the tag points to"
-        value: ${{ jobs.overlay.outputs.sha }}
+        value: ${{ jobs.publish.outputs.sha }}
 
 permissions:
   contents: read
@@ -84,41 +96,52 @@ concurrency:
   group: hotfix-overlay-${{ inputs.app }}
   cancel-in-progress: false
 
+env:
+  APP: ${{ inputs.app }}
+  BASE: ${{ inputs.base }}
+  COMMITS: ${{ inputs.commits }}
+  HOTFIX_ID: ${{ inputs.hotfix_id }}
+  BRANCH: ${{ inputs.branch }}
+  FRONT_SOURCES: ${{ inputs.front_sources }}
+  ARTIFACT_PATHS: ${{ inputs.artifact_paths }}
+  RUN_ID: ${{ github.run_id }}
+  CI_REF: ${{ inputs.ci_ref }}
+
 jobs:
-  overlay:
-    name: the fix, laid on the base
+  build:
+    name: build the overlay (no write token)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     outputs:
-      tag: ${{ steps.publish.outputs.tag }}
-      sha: ${{ steps.publish.outputs.sha }}
-    env:
-      APP: ${{ inputs.app }}
-      BASE: ${{ inputs.base }}
-      COMMITS: ${{ inputs.commits }}
-      HOTFIX_ID: ${{ inputs.hotfix_id }}
-      BRANCH: ${{ inputs.branch }}
-      FRONT_SOURCES: ${{ inputs.front_sources }}
-      ARTIFACT_PATHS: ${{ inputs.artifact_paths }}
-      RUN_ID: ${{ github.run_id }}
+      tip: ${{ steps.tip.outputs.tip }}
     steps:
+      - name: The pinned script is a full hash
+        run: |
+          case "$CI_REF" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "::error title=hotfix overlay refused (bad_input)::ci_ref is not a full hash"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: The script that decides (a refusal is a failure, never a skip)
-        run: |
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/hotfix_overlay.py" \
-            https://raw.githubusercontent.com/bvisible/neoffice-ci/main/scripts/hotfix_overlay.py
+      - uses: actions/checkout@v4
+        with:
+          repository: bvisible/neoffice-ci
+          ref: ${{ inputs.ci_ref }}
+          path: ci
+          persist-credentials: false
 
       - name: The inputs are what they should be, and the commits are fit to be laid
-        run: python3 "$RUNNER_TEMP/hotfix_overlay.py" check
+        run: python3 ci/scripts/hotfix_overlay.py check
 
       - name: Does the fix touch the front end?
         id: touch
-        run: python3 "$RUNNER_TEMP/hotfix_overlay.py" touches
+        run: python3 ci/scripts/hotfix_overlay.py touches
 
       - uses: actions/setup-node@v4
         if: ${{ steps.touch.outputs.front_touched == 'true' }}
@@ -144,29 +167,32 @@ jobs:
           # what the build writes is deleted first, so that nothing of an older build is counted as its own
           while IFS= read -r path; do [ -z "$path" ] || rm -rf -- "$path"; done <<< "$ARTIFACT_PATHS"
           bash -euo pipefail -c "$COMMAND"
-          python3 "$RUNNER_TEMP/hotfix_overlay.py" fileset > "$RUNNER_TEMP/built.txt"
-          python3 "$RUNNER_TEMP/hotfix_overlay.py" fileset --rev "$BASE" > "$RUNNER_TEMP/committed.txt"
-          python3 "$RUNNER_TEMP/hotfix_overlay.py" compare "$RUNNER_TEMP/built.txt" "$RUNNER_TEMP/committed.txt"
+          python3 ci/scripts/hotfix_overlay.py fileset > "$RUNNER_TEMP/built.txt"
+          python3 ci/scripts/hotfix_overlay.py fileset --rev "$BASE" > "$RUNNER_TEMP/committed.txt"
+          python3 ci/scripts/hotfix_overlay.py compare "$RUNNER_TEMP/built.txt" "$RUNNER_TEMP/committed.txt"
           # back to the base as it was committed
           git reset --hard --quiet "$BASE"
           while IFS= read -r path; do [ -z "$path" ] || git clean -fdxq -- "$path"; done <<< "$ARTIFACT_PATHS"
 
       - name: Lay the commits of the fix on the base
-        id: apply
-        run: python3 "$RUNNER_TEMP/hotfix_overlay.py" apply
+        run: |
+          python3 ci/scripts/hotfix_overlay.py apply
+          python3 ci/scripts/hotfix_overlay.py modes
 
       - name: The specs of the front end
-        if: ${{ steps.touch.outputs.front_touched == 'true' && inputs.specs_command != '' }}
+        if: ${{ steps.touch.outputs.front_touched == 'true' }}
         env:
           COMMAND: ${{ inputs.specs_command }}
-        run: bash -euo pipefail -c "$COMMAND"
+        run: |
+          test -n "$COMMAND" || { echo "::error title=hotfix overlay refused (no_specs)::a fix that touches the front end is not built without its specs"; exit 1; }
+          bash -euo pipefail -c "$COMMAND"
 
       - name: Build the front end on the base and the fix
         if: ${{ steps.touch.outputs.front_touched == 'true' }}
         env:
           COMMAND: ${{ inputs.build_command }}
         run: |
-          BUILD_VERSION="hf-$(printf '%s' "$HOTFIX_ID" | tr '[:upper:]' '[:lower:]')-${RUN_ID}"
+          BUILD_VERSION="$(python3 ci/scripts/hotfix_overlay.py build-version)"
           export BUILD_VERSION
           while IFS= read -r path; do [ -z "$path" ] || rm -rf -- "$path"; done <<< "$ARTIFACT_PATHS"
           bash -euo pipefail -c "$COMMAND"
@@ -178,13 +204,64 @@ jobs:
           fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit --quiet --no-verify -m "[hotfix] frontend artifacts of ${HOTFIX_ID}"
+          python3 ci/scripts/hotfix_overlay.py modes
+
+      - name: Hand over the overlay as a bundle
+        id: tip
+        run: |
+          tip="$(git rev-parse HEAD)"
+          git bundle create "$RUNNER_TEMP/overlay.bundle" HEAD "^$BASE"
+          echo "tip=$tip" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overlay-bundle
+          path: ${{ runner.temp }}/overlay.bundle
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: publish the tag (no third-party code)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.publish.outputs.tag }}
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: bvisible/neoffice-ci
+          ref: ${{ inputs.ci_ref }}
+          path: ci
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: overlay-bundle
+          path: ${{ runner.temp }}
+
+      - name: The inputs again, and the commits (the deploy branch may have moved)
+        run: python3 ci/scripts/hotfix_overlay.py check
 
       - name: Publish the tag
         id: publish
+        env:
+          BUILT_TIP: ${{ needs.build.outputs.tip }}
         run: |
-          tip="$(git rev-parse HEAD)"
-          tag="$(python3 "$RUNNER_TEMP/hotfix_overlay.py" next-tag)"
-          line="$(python3 "$RUNNER_TEMP/hotfix_overlay.py" notice --tag "$tag" --sha "$tip")"
+          # the commit the build job built is the commit of the bundle, and nothing else: it is checked, never assumed
+          git fetch --quiet "$RUNNER_TEMP/overlay.bundle" "HEAD:refs/hotfix-overlay/tip"
+          tip="$(git rev-parse refs/hotfix-overlay/tip)"
+          test "$tip" = "$BUILT_TIP" || { echo "::error title=hotfix overlay refused (bundle)::the bundle is not the commit the build said"; exit 1; }
+          git merge-base --is-ancestor "$BASE" "$tip" || { echo "::error title=hotfix overlay refused (bundle)::the bundle is not on the base"; exit 1; }
+          tag="$(python3 ci/scripts/hotfix_overlay.py next-tag)"
+          line="$(python3 ci/scripts/hotfix_overlay.py notice --tag "$tag" --sha "$tip")"
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             tag -a "$tag" -m "$line" "$tip"
           # never forced: a tag that exists is a rank that was taken
@@ -195,5 +272,4 @@ jobs:
           {
             echo "### Hotfix overlay ${HOTFIX_ID}"
             echo "- tag \`$tag\` -> \`$tip\`"
-            echo "- laid on \`${BASE}\`, from the commits \`${COMMITS}\`"
           } >> "$GITHUB_STEP_SUMMARY"

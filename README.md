@@ -105,8 +105,9 @@ jobs:
   overlay:
     permissions:
       contents: write
-    uses: bvisible/neoffice-ci/.github/workflows/hotfix-overlay.yml@main
+    uses: bvisible/neoffice-ci/.github/workflows/hotfix-overlay.yml@<full hash of a neoffice-ci commit>
     with:
+      ci_ref: <the same full hash>   # the script is run from it; never a branch
       app: my_app
       base: ${{ inputs.base }}
       commits: ${{ inputs.commits }}
@@ -122,8 +123,9 @@ jobs:
 
 What the hub does with the tag (judging it against a white list, trying it on a copy of the client's instance, laying it under
 maintenance with a way back) is in `bvisible/neoffice-devops`, `neoffice_devops/cloud/hotfix/`. The tag's message and a notice
-of the run say which run made which commit (`hotfix-overlay HF-0001 tag=… sha=… run=…`), for the hub to read back. A ruleset of
-the app's repository keeps a `hotfix/*` tag from being moved.
+of the run say which run made which commit (`hotfix-overlay HF-0001 tag=… sha=… run=…`), for the hub to read back. The hub believes a run only if the three files that ran (the caller, the workflow, the script) are versions it knows (`neoffice_devops/cloud/hotfix/trust.py`).
+Two jobs: `build` holds a read token (it runs third-party code) and hands over a git bundle, `publish` holds the write token and pushes one annotated tag.
+A ruleset of the app's repository keeps a `hotfix/*` tag from being moved.
 
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.

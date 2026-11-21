@@ -56,7 +56,7 @@ class TestTheInputsAreExactlyWhatTheyShouldBe(unittest.TestCase):
             self.assertEqual(self.refused(commits=[bad]), "bad_input", bad)
 
     def test_the_identifier_is_opaque(self):
-        for bad in ("HF-1", "hf-0001", "SRV-0158", "HF-0001\n", "HF-0001 ", "HF-0001;id", "", "HF-0001-acme"):
+        for bad in ("HF-1", "hf-0001", "SRV-9999", "HF-0001\n", "HF-0001 ", "HF-0001;id", "", "HF-0001-acme"):
             self.assertEqual(self.refused(hotfix_id=bad), "bad_input", repr(bad))
 
     def test_the_app_and_the_branch_are_plain_names(self):
@@ -238,6 +238,52 @@ class TestTheTag(unittest.TestCase):
             h.notice_line("hotfix/pos_next/0123456-1", "a" * 40, "HF-0001", "123456789"),
             f"hotfix-overlay HF-0001 tag=hotfix/pos_next/0123456-1 sha={'a' * 40} run=123456789",
         )
+
+
+class TestWhatTheBuildMayWrite(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.repo = self._dir.name
+        git(self.repo, "init", "-q", "-b", "version-15")
+        self.base = commit(self.repo, {"a.txt": "1\n"}, "base")
+
+    def test_a_fix_commit_that_writes_the_build_is_refused(self):
+        hand = commit(self.repo, {"pkg/public/pos/assets/x-AAAAAAAA.js": "evil\n"}, "writes the build by hand")
+        git(self.repo, "update-ref", "refs/remotes/origin/version-15", hand)
+        with self.assertRaises(h.Refusal) as caught:
+            h.check_commits(self.repo, self.base, [hand], "origin/version-15", ["pkg/public/pos/", "pkg/www/pos.html"])
+        self.assertEqual(caught.exception.code, "fix_writes_the_build")
+
+    def test_a_fix_that_does_not_is_fit(self):
+        fix = commit(self.repo, {"src/x.js": "ok\n"}, "a source")
+        git(self.repo, "update-ref", "refs/remotes/origin/version-15", fix)
+        self.assertIsNone(h.check_commits(self.repo, self.base, [fix], "origin/version-15", ["pkg/public/pos/"]))
+
+    def test_a_symlink_is_not_a_file_of_a_fix(self):
+        Path(self.repo, "link").symlink_to("../../../sites/prod.local/site_config.json")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "a link")
+        with self.assertRaises(h.Refusal) as caught:
+            h.check_modes(self.repo, self.base)
+        self.assertEqual(caught.exception.code, "not_a_regular_file")
+
+    def test_regular_files_pass_and_an_executable_too(self):
+        Path(self.repo, "run.sh").write_text("#!/bin/sh\n")
+        Path(self.repo, "run.sh").chmod(0o755)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "a script")
+        self.assertIsNone(h.check_modes(self.repo, self.base))
+
+    def test_the_build_version_holds_no_identifier_and_no_run(self):
+        version = h.build_version(SHA, [SHA[::-1], "f" * 40])
+        self.assertEqual(version, "hf-0123456-fffffff")
+        self.assertNotIn("HF", version)
+
+    def test_the_ranks_run_out_at_four_digits(self):
+        refs = [f"refs/tags/hotfix/pos_next/0123456-{n}" for n in (1, 9999)]
+        with self.assertRaises(h.Refusal):
+            h.next_tag("pos_next", SHA, refs)
 
 
 class TestWhatTheLogCarries(unittest.TestCase):
