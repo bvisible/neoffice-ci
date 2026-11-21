@@ -91,6 +91,40 @@ blocking pytest pass and of `node --test`, and the hub posts on the repository's
 and its failing tests by name (never a traceback, an error message or a parameter). The end of the log is sent only
 when no failing test is found, or when the script cannot run.
 
+## A targeted fix (`hotfix-overlay.yml`)
+
+One fix, already on the deploy branch and tried, laid on the base an instance already runs, with no wave: the commits are
+cherry-picked (`-x`) onto that base, the front end is rebuilt on it when they touch it (the base's own build is the witness that
+the build is reproducible: it must give the files the base committed, fingerprints aside), the specs of the front end run, and
+the result is published as a TAG `hotfix/<app>/<base7>-<n>`, never a branch. The caller, in the app's repository, is started by
+hand with a base, some commits and an opaque identifier (`HF-0001`); it never takes a name of an instance, of a host or of a client,
+and the inputs are validated (`scripts/hotfix_overlay.py`) and never written into a shell command.
+
+```yaml
+jobs:
+  overlay:
+    permissions:
+      contents: write
+    uses: bvisible/neoffice-ci/.github/workflows/hotfix-overlay.yml@main
+    with:
+      app: my_app
+      base: ${{ inputs.base }}
+      commits: ${{ inputs.commits }}
+      hotfix_id: ${{ inputs.hotfix_id }}
+      front_sources: |      # the sources of the front end: the build runs only when the fix touches one
+        frontend/src/
+      artifact_paths: |     # everything the build writes and the repository commits
+        my_app/public/frontend/
+      install_command: cd frontend && yarn install --frozen-lockfile
+      build_command: BUILD_TIME_VERSION="$BUILD_VERSION" yarn build   # BUILD_VERSION is set by the workflow
+      specs_command: cd frontend && yarn vitest run
+```
+
+What the hub does with the tag (judging it against a white list, trying it on a copy of the client's instance, laying it under
+maintenance with a way back) is in `bvisible/neoffice-devops`, `neoffice_devops/cloud/hotfix/`. The tag's message and a notice
+of the run say which run made which commit (`hotfix-overlay HF-0001 tag=… sha=… run=…`), for the hub to read back. A ruleset of
+the app's repository keeps a `hotfix/*` tag from being moved.
+
 Source of truth: this file. The fleet tooling (`bvisible/neoffice-devops`) documents the
 chain; the tracker is `bvisible/neoffice-maintenance`.
 
